@@ -29,7 +29,7 @@ import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsGatt"
+    private val TAG = "AirPodsGattOneShot"
     private val PERMISSION_REQUEST_CODE = 1001
 
     // 표준 배터리 서비스 및 특성 UUID
@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var batteryResultText: TextView
     private lateinit var logText: TextView
-    private lateinit var btnConnect: Button
+    private lateinit var btnCheckBattery: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,25 +55,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods GATT Connect Client"
+            text = "AirPods Battery Reader"
             textSize = 22f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 15)
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 뚜껑을 연 후 연결 버튼을 눌러주세요."
+            text = "에어팟 뚜껑을 연 뒤 아래 버튼을 눌러주세요."
             textSize = 14f
             setPadding(0, 0, 0, 15)
         }
 
-        btnConnect = Button(this).apply {
-            text = "에어팟 탐색 및 GATT 직접 연결"
+        btnCheckBattery = Button(this).apply {
+            text = "에어팟 배터리 확인"
             setPadding(0, 30, 0, 30)
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 GATT 연결 대기 중..."
+            text = "🎧 버튼을 누르면 배터리를 1회 읽어옵니다."
             textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(40, 40, 40, 40)
@@ -89,7 +89,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- GATT 통신 로그 ---\n"
+            text = "--- 조회 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -98,7 +98,7 @@ class MainActivity : AppCompatActivity() {
 
         rootLayout.addView(titleText)
         rootLayout.addView(statusText)
-        rootLayout.addView(btnConnect)
+        rootLayout.addView(btnCheckBattery)
         rootLayout.addView(batteryResultText)
         rootLayout.addView(scrollView)
         setContentView(rootLayout)
@@ -106,16 +106,16 @@ class MainActivity : AppCompatActivity() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
 
-        btnConnect.setOnClickListener {
+        btnCheckBattery.setOnClickListener {
             if (checkPermissions()) {
-                startScanForGattConnect()
+                startSingleScan()
             } else {
                 requestPermissions()
             }
         }
     }
 
-    private fun startScanForGattConnect() {
+    private fun startSingleScan() {
         if (isScanning) return
 
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
@@ -129,9 +129,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("🔍 [1/3] 에어팟 탐색 시작 (신호 세기 -75 dBm 이상 대상)...")
+        // 기존 연결 정리
+        closeGatt()
+
+        addLog("🔍 에어팟 탐색 중...")
         isScanning = true
-        statusText.text = "연결할 에어팟 신호 탐색 중..."
+        statusText.text = "에어팟 탐색 중..."
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -148,10 +151,10 @@ class MainActivity : AppCompatActivity() {
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C)
 
-            // 근접 Apple 기기 발견 시 스캔 중단 후 GATT 연결 시도
+            // 근접 Apple 기기 발견 시 스캔 중단 후 GATT 연결
             if (manuData != null && rssi > -75) {
                 stopScan()
-                connectToDeviceGatt(device)
+                connectAndReadOnce(device)
             }
         }
     }
@@ -166,21 +169,19 @@ class MainActivity : AppCompatActivity() {
         bluetoothLeScanner?.stopScan(scanCallback)
     }
 
-    private fun connectToDeviceGatt(device: BluetoothDevice) {
+    private fun connectAndReadOnce(device: BluetoothDevice) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             return
         }
 
         val deviceName = device.name ?: device.address
-        addLog("🔗 [2/3] $deviceName 기기에 GATT Direct Connect 시도...")
-        statusText.text = "GATT 연결 시도 중..."
+        addLog("🔗 $deviceName 연결 및 배터리 읽기 시도...")
+        statusText.text = "GATT 연결 중..."
 
-        // GATT 연결 시작 (autoConnect = false)
         bluetoothGatt = device.connectGatt(this, false, gattCallback)
     }
 
-    // GATT 통신 상태 및 이벤트를 수신하는 콜백 객체
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
@@ -189,76 +190,91 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                addLog("✅ GATT 서버 연결 성공! 서비스 목록 탐색 시작...")
-                runOnUiThread { statusText.text = "GATT 연결됨. 서비스 탐색 중..." }
-                
-                // 연결 성공 시 기기의 GATT 서비스 목록 탐색 요청
+                addLog("✅ 연결 성공. 서비스 탐색 중...")
                 gatt.discoverServices()
-
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                addLog("❌ GATT 연결 해제됨 (Status: $status)")
-                runOnUiThread {
-                    statusText.text = "GATT 연결 해제됨"
-                    batteryResultText.text = "🎧 GATT 연결이 끊어졌습니다."
-                }
+                addLog("⏹ GATT 연결 종료됨")
+                runOnUiThread { statusText.text = "조회 완료" }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("🎉 [3/3] GATT 서비스 탐색 완료!")
-                
-                var batteryCharFound = false
+                val batteryService = gatt.getService(BATTERY_SERVICE_UUID)
+                val batteryChar = batteryService?.getCharacteristic(BATTERY_LEVEL_CHAR_UUID)
 
-                // 기기가 보유한 모든 GATT Service 순회
-                for (service in gatt.services) {
-                    addLog(" 📦 Service UUID: ${service.uuid}")
+                if (batteryChar != null) {
+                    addLog("★ 배터리 수치 단발성 읽기 요청...")
 
-                    for (characteristic in service.characteristics) {
-                        addLog("   └ Char UUID: ${characteristic.uuid}")
-
-                        // 표준 BLE 배터리 서비스 특성이 존재하는지 체크
-                        if (characteristic.uuid == BATTERY_LEVEL_CHAR_UUID) {
-                            batteryCharFound = true
-                            addLog("   ★ [배터리 특성 발견!] 값 읽기 요청...")
-                            
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                                ActivityCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                                return
-                            }
-                            gatt.readCharacteristic(characteristic)
-                        }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        ActivityCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                        return
                     }
-                }
-
-                if (!batteryCharFound) {
-                    addLog("⚠️ 표준 배터리 특성 없음 (Apple 사유 특성 목록 수신 완료)")
-                    runOnUiThread {
-                        batteryResultText.text = "🎧 GATT 연결 성공!\n(기기가 제공하는 특성 목록을 로그에서 확인하세요)"
-                    }
+                    // 단 1회 읽기 요청
+                    gatt.readCharacteristic(batteryChar)
+                } else {
+                    addLog("⚠️ 배터리 서비스 특성을 찾을 수 없습니다.")
+                    closeGatt()
                 }
             } else {
                 addLog("서비스 탐색 실패: $status")
+                closeGatt()
             }
         }
 
-        // 특성 값 읽기 결과 콜백
+        // 안드로이드 구버전 콜백
         override fun onCharacteristicRead(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                if (characteristic.uuid == BATTERY_LEVEL_CHAR_UUID) {
-                    val batteryLevel = characteristic.value[0].toInt() and 0xFF
-                    addLog("🎉 [GATT 배터리 수치 수신 성공!] -> $batteryLevel%")
-                    
-                    runOnUiThread {
-                        batteryResultText.text = "🎉 [GATT 배터리 수신 성공!]\n\n• 배터리 잔량: $batteryLevel%\n(GATT Client Direct Read)"
-                    }
+            handleBatteryData(gatt, characteristic, status, characteristic.value)
+        }
+
+        // 안드로이드 13+(API 33+) 콜백
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            handleBatteryData(gatt, characteristic, status, value)
+        }
+    }
+
+    private fun handleBatteryData(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int, value: ByteArray?) {
+        if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == BATTERY_LEVEL_CHAR_UUID) {
+            if (value != null && value.isNotEmpty()) {
+                val batteryLevel = value[0].toInt() and 0xFF
+
+                addLog("🎉 [배터리 수신 성공] -> $batteryLevel%")
+
+                runOnUiThread {
+                    batteryResultText.text = """
+                        🎉 [에어팟 배터리 잔량]
+                        
+                        • 현재 배터리: $batteryLevel%
+                        
+                        (단발성 GATT 조회 완료)
+                    """.trimIndent()
                 }
             }
+        } else {
+            addLog("배터리 읽기 실패 (Status: $status)")
         }
+
+        // 수치 수신 완료 후 즉시 GATT 세션 종료 (전력 절감)
+        closeGatt()
+    }
+
+    private fun closeGatt() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+        bluetoothGatt?.disconnect()
+        bluetoothGatt?.close()
+        bluetoothGatt = null
     }
 
     private fun addLog(message: String) {
@@ -297,11 +313,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-        bluetoothGatt?.close()
-        bluetoothGatt = null
+        closeGatt()
     }
 }
