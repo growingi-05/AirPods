@@ -2,7 +2,6 @@ package com.example.galaxyairpods
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -29,15 +28,12 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
-    private val SCAN_PERIOD: Long = 10000 
+    private val SCAN_PERIOD: Long = 12000 // 12초 스캔
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var isScanning = false
     private val handler = Handler(Looper.getMainLooper())
-
-    // 내 폰에 등록된 페어링 기기 MAC 주소 목록
-    private val bondedMacAddresses = mutableSetOf<String>()
 
     private lateinit var statusText: TextView
     private lateinit var batteryResultText: TextView
@@ -60,18 +56,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "페어링된 기기 MAC 주소를 조회합니다."
+            text = "에어팟 뚜껑을 연 뒤 스캔을 눌러주세요."
             textSize = 15f
             setPadding(0, 0, 0, 20)
         }
 
         btnScan = Button(this).apply {
-            text = "등록 기기 매칭 스캔 시작"
+            text = "에어팟 탐색 시작"
             setPadding(0, 30, 0, 30)
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 스캔 버튼을 누르면 내 페어링 기기를 추적합니다."
+            text = "🎧 에어팟 신호를 대기 중입니다..."
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(30, 30, 30, 30)
@@ -87,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 등록 기기 및 BLE 로그 ---\n"
+            text = "--- 수신 로그 ---\n"
             textSize = 12f
             setBackgroundColor(0x11000000)
         }
@@ -125,38 +121,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-            
-            // 1. 등록된 페어링 기기 MAC 주소 전체 추출
-            loadBondedDevices()
-            
-            // 2. BLE 스캔 시작
             startLeScan()
         } else {
             requestPermissions()
         }
-    }
-
-    private fun loadBondedDevices() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-
-        bondedMacAddresses.clear()
-        val pairedDevices: Set<BluetoothDevice>? = bluetoothAdapter?.bondedDevices
-        
-        addLog("📱 [내 갤럭시 등록 기기 목록]")
-        if (!pairedDevices.isNullOrEmpty()) {
-            for (device in pairedDevices) {
-                val deviceName = device.name ?: "이름 없음"
-                val deviceAddress = device.address
-                bondedMacAddresses.add(deviceAddress)
-                addLog(" • $deviceName ($deviceAddress)")
-            }
-        } else {
-            addLog(" 등록된 블루투스 기기가 없습니다.")
-        }
-        addLog("----------------------------------\n")
     }
 
     private fun startLeScan() {
@@ -167,15 +135,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("스캔 시작... (내 페어링 MAC 주소 대조 중)")
+        addLog("🔍 스캔 시작 (에어팟 뚜껑을 열어 스마트폰 옆에 대어주세요)")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "등록된 기기 신호 탐색 중..."
+        statusText.text = "에어팟 배터리 데이터 분석 중..."
 
         handler.postDelayed({
             stopLeScan()
         }, SCAN_PERIOD)
 
+        // Apple (0x004C) 제조사 데이터 스캔
         val appleFilter = ScanFilter.Builder()
             .setManufacturerData(0x004C, byteArrayOf()) 
             .build()
@@ -202,7 +171,7 @@ class MainActivity : AppCompatActivity() {
 
         addLog("스캔 정지.")
         isScanning = false
-        btnScan.text = "등록 기기 매칭 스캔 시작"
+        btnScan.text = "에어팟 탐색 시작"
         statusText.text = "스캔 완료"
         bluetoothLeScanner?.stopScan(scanCallback)
     }
@@ -217,23 +186,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             val rssi = result.rssi
-            val deviceAddress = result.device.address
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
             val dataHex = manuData.joinToString("") { "%02X ".format(it) }
 
-            // ★ 핵심: 현재 수신된 BLE 기기의 MAC 주소가 내 페어링 목록에 있는지 대조
-            val isMyDevice = bondedMacAddresses.contains(deviceAddress)
+            // 로그에 수신되는 데이터 헤더 표시
+            addLog("📡 [신호 수신] RSSI: $rssi dBm | Length: ${manuData.size}B\nHex: $dataHex")
 
-            if (isMyDevice) {
-                addLog("🎯 [내 페어링 기기 신호 감지!]\nMAC: $deviceAddress | RSSI: $rssi dBm\nData: $dataHex")
-                
-                runOnUiThread {
-                    batteryResultText.text = "🎯 내 등록 기기 수신 성공!\nMAC 주소: $deviceAddress\n신호 세기: $rssi dBm"
-                }
-            } else {
-                // 주변 다른 Apple 기기 신호
-                addLog("🍏 [기타 Apple 신호]\nMAC: $deviceAddress | RSSI: $rssi dBm")
-            }
+            // ★ 핵심: 애플 기기 패킷 내부에서 에어팟 배터리 프로토콜(0x07) 위치 자동 탐색
+            parseAirPodsPacket(manuData, rssi)
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -241,6 +201,61 @@ class MainActivity : AppCompatActivity() {
             addLog("스캔 실패: 오류 코드 $errorCode")
             statusText.text = "스캔 실패"
             stopLeScan()
+        }
+    }
+
+    private fun parseAirPodsPacket(data: ByteArray, rssi: Int) {
+        try {
+            // 바이트 배열에서 에어팟 배터리 데이터 시작점(0x07)을 찾음
+            var startIdx = -1
+            for (i in 0 until data.size - 5) {
+                if (data[i] == 0x07.toByte()) {
+                    startIdx = i
+                    break
+                }
+            }
+
+            if (startIdx != -1 && data.size >= startIdx + 7) {
+                // 0x07 이후의 배터리 데이터 영역 인덱싱
+                val rawLeft = (data[startIdx + 5].toInt() and 0xF0) shr 4
+                val rawRight = data[startIdx + 5].toInt() and 0x0F
+                val rawCase = (data[startIdx + 6].toInt() and 0xF0) shr 4
+
+                // 유닛 반전 비트 확인
+                val isFlipped = (data[startIdx + 4].toInt() and 0x20) != 0
+                val leftVal = if (isFlipped) rawRight else rawLeft
+                val rightVal = if (isFlipped) rawLeft else rawRight
+
+                val leftStr = formatBattery(leftVal)
+                val rightStr = formatBattery(rightVal)
+                val caseStr = formatBattery(rawCase)
+
+                val displayText = """
+                    🎉 [에어팟 배터리 감지 성공!]
+                    
+                    • 왼쪽 유닛 (L): $leftStr
+                    • 오른쪽 유닛 (R): $rightStr
+                    • 충전 케이스: $caseStr
+                    
+                    (신호 세기: $rssi dBm)
+                """.trimIndent()
+
+                runOnUiThread {
+                    batteryResultText.text = displayText
+                }
+
+                addLog("✅ [배터리 매칭 완료] L: $leftStr, R: $rightStr, Case: $caseStr")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "패킷 해독 예외", e)
+        }
+    }
+
+    private fun formatBattery(valRaw: Int): String {
+        return when (valRaw) {
+            in 0..10 -> "${valRaw * 10}%"
+            15 -> "케이스 내부 / 미연결"
+            else -> "알 수 없음 ($valRaw)"
         }
     }
 
@@ -287,7 +302,7 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "권한 허용됨. 스캔 가능."
             } else {
                 statusText.text = "권한 거부됨. 스캔 불가."
-                Toast.makeText(this, "스캔을 위해 블루투스 권한이 필요합니다.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "스캔을 위해 권한이 필요합니다.", Toast.LENGTH_LONG).show()
             }
         }
     }
