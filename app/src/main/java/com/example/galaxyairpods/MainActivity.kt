@@ -29,7 +29,6 @@ class MainActivity : AppCompatActivity() {
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
 
-    // 배터리 절약을 위한 스캔 제한 시간 (10초)
     private val SCAN_PERIOD: Long = 10000 
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -37,7 +36,6 @@ class MainActivity : AppCompatActivity() {
     private var isScanning = false
     private val handler = Handler(Looper.getMainLooper())
 
-    // UI 요소
     private lateinit var statusText: TextView
     private lateinit var logText: TextView
     private lateinit var btnScan: Button
@@ -45,7 +43,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // --- UI 구성 ---
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 100, 50, 50)
@@ -77,7 +74,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 에어팟 신호 로그 ---\n"
+            text = "--- 애플 기기 감지 로그 ---\n"
             textSize = 13f
             setBackgroundColor(0x11000000)
         }
@@ -89,7 +86,6 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(scrollView)
         setContentView(rootLayout)
 
-        // 블루투스 어댑터 초기화
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
 
@@ -129,10 +125,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("스캔 시작 (근처 에어팟 탐색 중...)")
+        addLog("스캔 시작... (에어팟 뚜껑을 열어두세요!)")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "주변 에어팟 탐색 중..."
+        statusText.text = "탐색 중..."
 
         handler.postDelayed({
             stopLeScan()
@@ -181,16 +177,11 @@ class MainActivity : AppCompatActivity() {
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // [필터 1] 근처 기기만 (-70 dBm 이상)
-            if (rssi < -70) return
+            // 조건 없이 잡히는 모든 Apple(0x004C) 신호 출력
+            val deviceAddress = result.device.address
+            val dataStr = manuData.joinToString("") { "%02X ".format(it) }
 
-            // [필터 2] 에어팟 패킷 크기 (27바이트)
-            if (manuData.size == 27) {
-                val deviceAddress = result.device.address
-                val dataStr = manuData.joinToString("") { "%02X ".format(it) }
-
-                addLog("🎧 [에어팟 추정 기기 발견!]\n주소: $deviceAddress | RSSI: $rssi dBm\n데이터: $dataStr")
-            }
+            addLog("🍎 [Apple 기기 감지]\n주소: $deviceAddress\n신호강도(RSSI): $rssi dBm\n데이터길이: ${manuData.size} bytes\n데이터: $dataStr")
         }
 
         override fun onScanFailed(errorCode: Int) {
