@@ -38,7 +38,6 @@ class MainActivity : AppCompatActivity() {
     private var isScanning = false
     private var isConnected = false
 
-    // 실시간 연결된 기기 이름
     private var activeDeviceName: String = "내 AirPods Pro"
     private var totalApplePackets = 0
 
@@ -57,7 +56,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnManualSearch: Button
 
-    // 오디오 연결 감지 (진짜 연결된 기기 이름 수집)
     private val connectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -208,7 +206,6 @@ class MainActivity : AppCompatActivity() {
         isScanning = true
         statusText.text = "BLE 패킷 수신 중..."
 
-        // 🚨 수정된 부분: 애플(0x004C) 전용 스캔 필터 추가 (갤럭시 통신 차단 방지)
         val filters = listOf(
             ScanFilter.Builder()
                 .setManufacturerData(0x004C, byteArrayOf())
@@ -239,7 +236,6 @@ class MainActivity : AppCompatActivity() {
             val batteryInfo = parseAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
-
                 lastValidLeft = leftStr
                 lastValidRight = rightStr
                 lastValidCase = caseStr
@@ -290,10 +286,6 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
-
-        if (lastValidLeft != null) {
-            updateUI(lastValidLeft!!, lastValidRight!!, lastValidCase!!, -70)
-        }
         return false
     }
 
@@ -319,8 +311,8 @@ class MainActivity : AppCompatActivity() {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
 
-                    // 🚨 수정된 부분: 17바이트(0x11) 암호화 패킷 무시, 평문 패킷(0x18, 0x19 등)만 허용
-                    if (subLen == 0x11 || subLen < 0x18) {
+                    // 🚨 치명적이었던 0x11 길이 제한 완전히 삭제! 최소 바이트 수만 검증
+                    if (subLen < 5) {
                         i += subLen + 2
                         continue
                     }
@@ -337,9 +329,12 @@ class MainActivity : AppCompatActivity() {
                     val leftVal = if (isFlipped) rawRight else rawLeft
                     val rightVal = if (isFlipped) rawLeft else rawRight
 
+                    // 오직 유효한 배터리 수치(0~11, 15)인지만 검증 (암호화된 더미 12, 13, 14는 여기서 자연스럽게 차단됨)
                     val isLeftValid = leftVal in 0..11 || leftVal == 15
                     val isRightValid = rightVal in 0..11 || rightVal == 15
                     val isCaseValid = rawCase in 0..11 || rawCase == 15
+                    
+                    // 최소 하나라도 실제 % (0..11) 수치를 가지고 있어야 함
                     val hasRealVal = leftVal in 0..11 || rightVal in 0..11 || rawCase in 0..11
 
                     if (isLeftValid && isRightValid && isCaseValid && hasRealVal) {
