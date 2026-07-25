@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsFix"
+    private val TAG = "AirPodsFixFinal"
     private val PERMISSION_REQUEST_CODE = 1001
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -38,11 +38,11 @@ class MainActivity : AppCompatActivity() {
     private var isScanning = false
     private var isConnected = false
     private var connectedDeviceName: String = "더혀니의 AirPods Pro"
+    private var totalPacketCount = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private var batteryUpdateRunnable: Runnable? = null
 
-    // 패킷 링 버퍼
     private data class PacketRecord(val timestamp: Long, val data: ByteArray, val rssi: Int)
     private val packetQueue = ConcurrentLinkedQueue<PacketRecord>()
 
@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
 
         btnManualSearch.setOnClickListener {
             if (checkPermissions()) {
-                addLog("👆 수동 큐 해독 요청")
+                addLog("👆 수동 큐 해독 요청 (현재 큐 크기: ${packetQueue.size})")
                 searchBatteryFromQueue()
             } else {
                 requestPermissions()
@@ -153,7 +153,8 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("📡 삼성 최적화 BLE 스캐너 가동")
+            addLog("💡 [체크] 핸드폰 상단바 '위치(GPS)'가 켜져 있는지 확인하세요!")
+            addLog("📡 BLE 스캐너 가동 중...")
             startRealtimeScan()
         } else {
             requestPermissions()
@@ -170,11 +171,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "애플 패킷 수신 중..."
+        statusText.text = "BLE 신호 감지 중..."
 
-        // ★ 삼성 기기 필수: 0x004C 애플 제조사 필터 적용
+        // ★ 핵심 수정: 0x004C 모든 제조사 데이터를 통과시키는 와일드카드 마스크 설정
         val appleFilter = ScanFilter.Builder()
-            .setManufacturerData(0x004C, byteArrayOf())
+            .setManufacturerData(0x004C, byteArrayOf(0x00), byteArrayOf(0x00))
             .build()
 
         val settings = ScanSettings.Builder()
@@ -189,18 +190,26 @@ class MainActivity : AppCompatActivity() {
             super.onScanResult(callbackType, result)
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
+            totalPacketCount++
             val currentTime = System.currentTimeMillis()
             packetQueue.add(PacketRecord(currentTime, manuData, result.rssi))
 
+            // 15초 경과 패킷 삭제
             while (packetQueue.isNotEmpty() && (currentTime - (packetQueue.peek()?.timestamp ?: currentTime)) > 15000) {
                 packetQueue.poll()
             }
 
-            // 실시간 패킷 수신 시 즉시 화면 반영
+            // 패킷 수신 시 실시간 카운터 로그 출력 (처음 5개 + 이후 10개 단위)
+            if (totalPacketCount <= 5 || totalPacketCount % 10 == 0) {
+                addLog("📥 [패킷 수신 #$totalPacketCount] Apple 패킷 큐 저장 완료 (${result.rssi} dBm)")
+            }
+
+            // 패킷 해독 시도
             val batteryInfo = parseValidAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
-                val (leftStr, rightStr, caseStr, _) = batteryInfo
+                val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
                 updateUI(leftStr, rightStr, caseStr, result.rssi)
+                addLog("🎉 [실시간 배터리 포착!] L:$leftStr | R:$rightStr | Case:$caseStr")
             }
         }
     }
@@ -224,14 +233,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun searchBatteryFromQueue(): Boolean {
-        if (packetQueue.isEmpty()) return false
+        if (packetQueue.isEmpty()) {
+            addLog("⚠️ 링 버퍼 큐가 비어있습니다. (위치/GPS 켜짐 여부 확인 필요)")
+            return false
+        }
 
         for (record in packetQueue.reversed()) {
             val batteryInfo = parseValidAirPodsBatteryData(record.data)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
                 updateUI(leftStr, rightStr, caseStr, record.rssi)
-                addLog("✅ [해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${record.rssi} dBm)")
+                addLog("✅ [큐 해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr")
                 return true
             }
         }
@@ -249,7 +261,7 @@ class MainActivity : AppCompatActivity() {
                 
                 (신호 감도: $rssi dBm)
             """.trimIndent()
-            statusText.text = "연결됨: 실시간 추적 중"
+            statusText.text = "연결됨: 실시간 수신 완료"
         }
     }
 
@@ -273,35 +285,22 @@ class MainActivity : AppCompatActivity() {
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
-                        // ★ 12~14 범위만 더미로 차단 (11은 100% 완충이므로 허용)
-                        if (leftVal in 12..14 || rightVal in 12..14 || rawCase in 12..14) {
-                            i += if (subLen > 0) subLen + 2 else 1
-                            continue
-                        }
+                        val chargeStatus = caseByte and 0x0F
+                        val isLeftCharging = (chargeStatus and 0x01) != 0
+                        val isRightCharging = (chargeStatus and 0x02) != 0
+                        val isCaseCharging = (chargeStatus and 0x04) != 0
 
-                        val isLeftValid = leftVal in 0..11 || leftVal == 15
-                        val isRightValid = rightVal in 0..11 || rightVal == 15
-                        val isCaseValid = rawCase in 0..11 || rawCase == 15
-                        val hasRealBattery = leftVal in 0..11 || rightVal in 0..11 || rawCase in 0..11
+                        val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
+                        val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
 
-                        if (isLeftValid && isRightValid && isCaseValid && hasRealBattery) {
-                            val chargeStatus = caseByte and 0x0F
-                            val isLeftCharging = (chargeStatus and 0x01) != 0
-                            val isRightCharging = (chargeStatus and 0x02) != 0
-                            val isCaseCharging = (chargeStatus and 0x04) != 0
+                        val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
+                        val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
+                        val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
 
-                            val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
-                            val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
+                        val endIdx = minOf(i + 2 + subLen, data.size)
+                        val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
 
-                            val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
-                            val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
-                            val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
-
-                            val endIdx = minOf(i + 2 + subLen, data.size)
-                            val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
-
-                            return Quadruple(leftStr, rightStr, caseStr, rawHex)
-                        }
+                        return Quadruple(leftStr, rightStr, caseStr, rawHex)
                     }
                     i += if (subLen > 0) subLen + 2 else 1
                 } else {
@@ -319,7 +318,7 @@ class MainActivity : AppCompatActivity() {
         val chargeSymbol = if (isCharging) " ⚡(충전 중)" else ""
         return when (valRaw) {
             in 0..10 -> "${valRaw * 10}%$chargeSymbol"
-            11 -> "100%$chargeSymbol" // 완충 상태 (100%)
+            in 11..14 -> "100%$chargeSymbol"
             15 -> "미연결/수면"
             else -> "알 수 없음 ($valRaw)"
         }
