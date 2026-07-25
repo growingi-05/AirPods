@@ -6,7 +6,6 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
@@ -30,7 +29,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsFixFinal"
+    private val TAG = "AirPodsDiagnostic"
     private val PERMISSION_REQUEST_CODE = 1001
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -101,7 +100,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "스캔 대기 중"
+            text = "스캔 준비 중"
             textSize = 13f
             setPadding(0, 15, 0, 10)
         }
@@ -120,7 +119,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 모니터링 로그 ---\n"
+            text = "--- 진단 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -153,63 +152,93 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("💡 [체크] 핸드폰 상단바 '위치(GPS)'가 켜져 있는지 확인하세요!")
-            addLog("📡 BLE 스캐너 가동 중...")
+            addLog("📡 BLE 진단 스캐너 시동...")
             startRealtimeScan()
         } else {
+            addLog("🔑 권한 요청 필요")
             requestPermissions()
         }
     }
 
     private fun startRealtimeScan() {
-        if (isScanning) return
-        bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner ?: return
+        if (bluetoothAdapter == null || !bluetoothAdapter!!.isEnabled) {
+            addLog("❌ 블루투스가 꺼져 있습니다. 블루투스를 켜주세요.")
+            return
+        }
+
+        bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
+        if (bluetoothLeScanner == null) {
+            addLog("❌ BluetoothLeScanner 객체를 가져오지 못했습니다.")
+            return
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+            addLog("❌ BLUETOOTH_SCAN 권한이 거부되었습니다.")
             return
+        }
+
+        // 기존 스캔 중단 후 재시작 (중복 스캔 오류 방지)
+        if (isScanning) {
+            try {
+                bluetoothLeScanner?.stopScan(scanCallback)
+            } catch (e: Exception) {
+                Log.e(TAG, "stopScan error", e)
+            }
+            isScanning = false
         }
 
         isScanning = true
         statusText.text = "BLE 신호 감지 중..."
-
-        // ★ 핵심 수정: 0x004C 모든 제조사 데이터를 통과시키는 와일드카드 마스크 설정
-        val appleFilter = ScanFilter.Builder()
-            .setManufacturerData(0x004C, byteArrayOf(0x00), byteArrayOf(0x00))
-            .build()
+        addLog("🔍 [startScan 실행] 무필터 고속 스캔 시작")
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        bluetoothLeScanner?.startScan(listOf(appleFilter), settings, scanCallback)
+        bluetoothLeScanner?.startScan(null, settings, scanCallback)
     }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
+            
+            // 수신된 패킷 중 Apple 제조사 ID(0x004C)만 추출
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
             totalPacketCount++
             val currentTime = System.currentTimeMillis()
             packetQueue.add(PacketRecord(currentTime, manuData, result.rssi))
 
-            // 15초 경과 패킷 삭제
+            // 15초 경과 패킷 정리
             while (packetQueue.isNotEmpty() && (currentTime - (packetQueue.peek()?.timestamp ?: currentTime)) > 15000) {
                 packetQueue.poll()
             }
 
-            // 패킷 수신 시 실시간 카운터 로그 출력 (처음 5개 + 이후 10개 단위)
-            if (totalPacketCount <= 5 || totalPacketCount % 10 == 0) {
-                addLog("📥 [패킷 수신 #$totalPacketCount] Apple 패킷 큐 저장 완료 (${result.rssi} dBm)")
+            // 첫 3개 수신 로그 및 10개 단위 로그 출력
+            if (totalPacketCount <= 3 || totalPacketCount % 10 == 0) {
+                addLog("📥 [패킷 수신 #$totalPacketCount] 애플 패킷 수집 성공! (큐 크기: ${packetQueue.size})")
             }
 
-            // 패킷 해독 시도
+            // 실시간 해독 시도
             val batteryInfo = parseValidAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
-                val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
+                val (leftStr, rightStr, caseStr, _) = batteryInfo
                 updateUI(leftStr, rightStr, caseStr, result.rssi)
-                addLog("🎉 [실시간 배터리 포착!] L:$leftStr | R:$rightStr | Case:$caseStr")
+                addLog("🎉 [배터리 포착 성공!] L:$leftStr | R:$rightStr | Case:$caseStr")
+            }
+        }
+
+        // 스캔 실패 시 원인 코드 출력
+        override fun onScanFailed(errorCode: Int) {
+            super.onScanFailed(errorCode)
+            isScanning = false
+            addLog("❌ [ScanFailed] 스캔 실패 에러 코드: $errorCode")
+            when (errorCode) {
+                SCAN_FAILED_ALREADY_STARTED -> addLog("  └ 원인: 이미 스캔이 실행 중입니다.")
+                SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> addLog("  └ 원인: 앱 등록 실패 (블루투스를 껐다 켜보세요).")
+                SCAN_FAILED_INTERNAL_ERROR -> addLog("  └ 원인: 안드로이드 내부 시스템 에러.")
+                SCAN_FAILED_FEATURE_UNSUPPORTED -> addLog("  └ 원인: BLE 스캔 미지원 기기.")
             }
         }
     }
@@ -234,7 +263,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun searchBatteryFromQueue(): Boolean {
         if (packetQueue.isEmpty()) {
-            addLog("⚠️ 링 버퍼 큐가 비어있습니다. (위치/GPS 켜짐 여부 확인 필요)")
+            addLog("⚠️ 링 버퍼 큐가 비어있습니다. (핸드폰 '위치/GPS'가 켜졌는지 확인하세요!)")
             return false
         }
 
@@ -349,9 +378,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkPermissions(): Boolean {
         val permissions = mutableListOf<String>()
+        // 안드로이드 12 이상
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION) // ★ 위치 권한 필수 동시 체크
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
@@ -365,10 +396,27 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         ActivityCompat.requestPermissions(this, permissions.toTypedArray(), PERMISSION_REQUEST_CODE)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                addLog("✅ 모든 권한 승인 완료! 스캔을 재시작합니다.")
+                startRealtimeScan()
+            } else {
+                addLog("❌ 권한이 거부되어 BLE 스캔을 수행할 수 없습니다.")
+            }
+        }
     }
 
     override fun onDestroy() {
