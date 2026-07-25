@@ -49,25 +49,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Pro 3 Debugger"
+            text = "AirPods Pro 3 Controller"
             textSize = 22f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 15)
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 뚜껑을 열고 스캔을 시작하세요."
+            text = "스캔 시작 버튼을 누른 후 뚜껑을 열어주세요."
             textSize = 14f
             setPadding(0, 0, 0, 15)
         }
 
         btnScan = Button(this).apply {
-            text = "디버그 스캔 시작"
+            text = "스캔 시작"
             setPadding(0, 30, 0, 30)
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 패킷 분석 대기 중..."
+            text = "🎧 근처 에어팟 신호를 대기 중입니다..."
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(30, 30, 30, 30)
@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 디버그 로그 ---\n"
+            text = "--- 감지 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -136,10 +136,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("▶ 스캔 시작! 에어팟 뚜껑을 열어주세요.")
+        addLog("▶ 스캔 시작! (지금 에어팟 뚜껑을 열어주세요)")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "패킷 분석 중..."
+        statusText.text = "근처 에어팟 신호 수신 중..."
 
         handler.postDelayed({
             stopLeScan()
@@ -171,7 +171,7 @@ class MainActivity : AppCompatActivity() {
 
         addLog("⏹ 스캔 정지.")
         isScanning = false
-        btnScan.text = "디버그 스캔 시작"
+        btnScan.text = "스캔 시작"
         statusText.text = "스캔 완료"
         bluetoothLeScanner?.stopScan(scanCallback)
     }
@@ -187,12 +187,14 @@ class MainActivity : AppCompatActivity() {
 
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
-            val hexStr = manuData.joinToString(" ") { "%02X".format(it) }
 
-            // 수신된 패킷을 화면에 전부 출력하여 확인
-            addLog("RX (RSSI:$rssi): $hexStr")
+            // 근처 기기 (RSSI -70 dBm 이상) 신호만 대조
+            if (rssi > -70) {
+                val hexStr = manuData.joinToString(" ") { "%02X".format(it) }
+                addLog("⚡ [근접 Apple 신호!] RSSI: $rssi | Hex: $hexStr")
 
-            parseAndShowBattery(manuData, rssi)
+                parseBatteryOrSignal(manuData, rssi)
+            }
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -203,11 +205,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseAndShowBattery(data: ByteArray, rssi: Int) {
+    private fun parseBatteryOrSignal(data: ByteArray, rssi: Int) {
         try {
             var startIdx = -1
             for (i in 0 until data.size - 2) {
-                // 0x07 패킷 탐색
                 if (data[i] == 0x07.toByte()) {
                     startIdx = i
                     break
@@ -215,6 +216,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (startIdx != -1 && data.size >= startIdx + 6) {
+                // 0x07 배터리 패킷 포착 시
                 val statusByte = data[startIdx + 3].toInt() and 0xFF
                 val earbudByte = data[startIdx + 4].toInt() and 0xFF
                 val caseByte = data[startIdx + 5].toInt() and 0xFF
@@ -231,19 +233,17 @@ class MainActivity : AppCompatActivity() {
                 val rightStr = formatBattery(rightVal)
                 val caseStr = formatBattery(rawCase)
 
-                val resultMsg = """
-                    🎉 [배터리 해독 성공!]
-                    • L: $leftStr | R: $rightStr | Case: $caseStr
-                    • Raw Bytes: L=$rawLeft, R=$rawRight, Case=$rawCase (RSSI: $rssi)
-                """.trimIndent()
-
                 runOnUiThread {
-                    batteryResultText.text = resultMsg
+                    batteryResultText.text = "🎉 [에어팟 프로3 배터리 해독!]\n• L: $leftStr | R: $rightStr | Case: $caseStr\n(신호 강도: $rssi dBm)"
                 }
-                addLog(">>> 성공! L:$leftStr R:$rightStr Case:$caseStr")
+            } else {
+                // 0x07 패킷은 아니지만 바로 옆에서 강력한 Apple 신호(0x12, 0x10 등)가 들어올 때
+                runOnUiThread {
+                    batteryResultText.text = "📡 바로 옆 에어팟 신호 수신 중...\n(뚜껑을 닫았다가 다시 열면 배터리가 표시됩니다!)"
+                }
             }
         } catch (e: Exception) {
-            addLog("파싱 오류: ${e.message}")
+            Log.e(TAG, "Parsing error", e)
         }
     }
 
@@ -289,9 +289,7 @@ class MainActivity : AppCompatActivity() {
         ActivityCompat.requestPermissions(this, permissions.toTypedArray(), PERMISSION_REQUEST_CODE)
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        // 생략 가능
-    }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {}
 
     override fun onPause() {
         super.onPause()
