@@ -36,14 +36,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnRefresh: Button
 
+    // 안드로이드 숨김 API 상수 정의 (배터리 변경 브로드캐스트 액션)
+    private val ACTION_BATTERY_LEVEL_CHANGED = "android.bluetooth.device.action.BATTERY_LEVEL_CHANGED"
+
     // 블루투스 방송 리시버
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
             
             when (action) {
-                // 1. 안드로이드 표준 블루투스 기기 배터리 잔량 변경 이벤트
-                BluetoothDevice.ACTION_BATTERY_LEVEL_CHANGED -> {
+                // 1. 안드로이드 블루투스 기기 배터리 잔량 변경 이벤트
+                ACTION_BATTERY_LEVEL_CHANGED -> {
                     val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
                     } else {
@@ -175,9 +178,8 @@ class MainActivity : AppCompatActivity() {
 
         // 시스템 브로드캐스트 필터 등록
         val filter = IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_BATTERY_LEVEL_CHANGED)
+            addAction(ACTION_BATTERY_LEVEL_CHANGED)
             addAction(BluetoothHeadset.ACTION_VENDOR_SPECIFIC_HEADSET_EVENT)
-            addCategory(BluetoothHeadset.VENDOR_SPECIFIC_HEADSET_EVENT_COMPANY_BASE_OF_CLASS_BLUETOOTH + 76) // Apple Company ID (0x004C = 76)
             addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
             addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
         }
