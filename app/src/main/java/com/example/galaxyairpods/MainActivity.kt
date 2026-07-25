@@ -29,10 +29,8 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsFilter"
+    private val TAG = "AirPodsProParser"
     private val PERMISSION_REQUEST_CODE = 1001
-
-    // 여유 있는 RSSI 기준 (-82 dBm 이상 수신)
     private val RSSI_THRESHOLD = -82
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -46,7 +44,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnManualScan: Button
 
-    // 1. 오디오 페어링/연결 이벤트 리시버
     private val connectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -61,7 +58,6 @@ class MainActivity : AppCompatActivity() {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
                     connectedDeviceName = getDeviceName(device)
                     addLog("⚡ [기기 연결 완료] $connectedDeviceName")
-                    addLog("🎯 페어링 감지 조건 충족 -> BLE 패킷 탐색 시작 ($RSSI_THRESHOLD dBm 이상)")
                     startTargetedBleScan()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
@@ -82,7 +78,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Smart Battery Monitor"
+            text = "AirPods Pro Battery Monitor"
             textSize = 22f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 15)
@@ -100,7 +96,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 에어팟 연결 대기 중...\n(귀에 꽂거나 뚜껑을 열어주세요)"
+            text = "🎧 에어팟 연결 대기 중..."
             textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(40, 40, 40, 40)
@@ -116,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 스마트 필터링 로그 ---\n"
+            text = "--- 배터리 해독 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -142,7 +138,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 블루투스 연결/해제 이벤트 등록
         val filter = IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
@@ -150,14 +145,13 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("📡 연결 리스너 활성화 완료 (RSSI 기준: $RSSI_THRESHOLD dBm)")
-            startTargetedBleScan() // 앱 실행 시 1회 자동 스캔
+            addLog("📡 배터리 모니터 활성화 (RSSI: $RSSI_THRESHOLD dBm)")
+            startTargetedBleScan()
         } else {
             requestPermissions()
         }
     }
 
-    // 타겟팅 BLE 스캔 실행 (6초간 수행)
     private fun startTargetedBleScan() {
         if (isScanning) return
 
@@ -168,9 +162,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("🔍 [BLE 타겟 스캔 시작] 애플 0x004C 패킷 탐색...")
+        addLog("🔍 [BLE 스캔 시작]")
         isScanning = true
-        statusText.text = "배터리 신호 수신 중..."
+        statusText.text = "배터리 신호 탐색 중..."
 
         handler.removeCallbacksAndMessages(null)
         handler.postDelayed({ stopBleScan() }, 6000)
@@ -204,18 +198,16 @@ class MainActivity : AppCompatActivity() {
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 1차 필터: 느슨해진 RSSI 감도 기준 (-82 dBm 이상만 허용)
             if (rssi < RSSI_THRESHOLD) return
 
-            // 2차 필터: 0x07 TLV 배터리 패킷 해독
-            val batteryInfo = parseAppleBatteryData(manuData)
+            val batteryInfo = parseAirPodsProData(manuData)
             if (batteryInfo != null) {
-                val (leftStr, rightStr, caseStr) = batteryInfo
-                val displayName = connectedDeviceName ?: "내 에어팟"
+                val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
+                val displayName = connectedDeviceName ?: "더혀니의 AirPods Pro"
 
                 runOnUiThread {
                     batteryResultText.text = """
-                        🎉 [$displayName 배터리 수신!]
+                        🎉 [$displayName 배터리 정보]
                         
                         • 왼쪽 (L): $leftStr
                         • 오른쪽 (R): $rightStr
@@ -225,38 +217,56 @@ class MainActivity : AppCompatActivity() {
                     """.trimIndent()
                 }
 
-                addLog("✅ [배터리 포착 성공] $displayName | L:$leftStr, R:$rightStr, Case:$caseStr ($rssi dBm)")
+                addLog("✅ [포착 성공] L:$leftStr | R:$rightStr | Case:$caseStr ($rssi dBm)")
+                addLog("  └ Raw Hex: $rawHex")
                 stopBleScan()
             }
         }
     }
 
-    // Apple TLV 패킷 (0x07 타입) 해독 알고리즘
-    private fun parseAppleBatteryData(data: ByteArray): Triple<String, String, String>? {
+    // --- AirPods Pro 전용 정밀 해독 함수 ---
+    private fun parseAirPodsProData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
             while (i < data.size - 5) {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
+
                     if (i + 5 < data.size) {
                         val statusByte = data[i + 3].toInt() and 0xFF
                         val earbudByte = data[i + 4].toInt() and 0xFF
                         val caseByte = data[i + 5].toInt() and 0xFF
 
+                        // raw 4-bit nibbles
                         val rawLeft = (earbudByte and 0xF0) ushr 4
                         val rawRight = earbudByte and 0x0F
                         val rawCase = (caseByte and 0xF0) ushr 4
 
+                        // 충전 상태 플래그 (0x01: L, 0x02: R, 0x04: Case)
+                        val chargeStatus = caseByte and 0x0F
+                        val isLeftCharging = (chargeStatus and 0x01) != 0
+                        val isRightCharging = (chargeStatus and 0x02) != 0
+                        val isCaseCharging = (chargeStatus and 0x04) != 0
+
+                        // 유닛 반전 비트 체크
                         val isFlipped = (statusByte and 0x20) != 0
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
-                        val leftStr = formatBattery(leftVal)
-                        val rightStr = formatBattery(rightVal)
-                        val caseStr = formatBattery(rawCase)
+                        val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
+                        val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
 
+                        val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
+                        val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
+                        val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
+
+                        // 0x07 서브 패킷 전체 Hex 디버깅용 추출
+                        val endIdx = minOf(i + 2 + subLen, data.size)
+                        val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
+
+                        // 유효한 수치가 하나라도 들어있으면 반환
                         if (leftVal in 0..10 || rightVal in 0..10 || rawCase in 0..10) {
-                            return Triple(leftStr, rightStr, caseStr)
+                            return Quadruple(leftStr, rightStr, caseStr, rawHex)
                         }
                     }
                     i += if (subLen > 0) subLen + 2 else 1
@@ -271,24 +281,25 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun formatBattery(valRaw: Int): String {
+    private fun formatBatteryWithCharge(valRaw: Int, isCharging: Boolean): String {
+        val chargeSymbol = if (isCharging) " ⚡(충전 중)" else ""
         return when (valRaw) {
-            in 0..10 -> "${valRaw * 10}%"
-            15 -> "케이스 안 / 미연결"
-            else -> "알 수 없음"
+            in 0..10 -> "${valRaw * 10}%$chargeSymbol"
+            15 -> "미연결/수면"
+            else -> "알 수 없음 ($valRaw)"
         }
     }
 
     private fun getDeviceName(device: BluetoothDevice?): String {
-        if (device == null) return "내 에어팟"
+        if (device == null) return "더혀니의 AirPods Pro"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            return "내 에어팟"
+            return "더혀니의 AirPods Pro"
         }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            device.alias ?: device.name ?: "내 에어팟"
+            device.alias ?: device.name ?: "더혀니의 AirPods Pro"
         } else {
-            device.name ?: "내 에어팟"
+            device.name ?: "더혀니의 AirPods Pro"
         }
     }
 
@@ -335,3 +346,5 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
+
+data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
