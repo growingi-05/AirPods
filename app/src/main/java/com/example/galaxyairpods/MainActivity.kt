@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
@@ -29,7 +30,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsMonitor"
+    private val TAG = "AirPodsFix"
     private val PERMISSION_REQUEST_CODE = 1001
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -41,7 +42,7 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var batteryUpdateRunnable: Runnable? = null
 
-    // 15초 이내 수신된 패킷 보관용 메모리 링 버퍼
+    // 패킷 링 버퍼
     private data class PacketRecord(val timestamp: Long, val data: ByteArray, val rssi: Int)
     private val packetQueue = ConcurrentLinkedQueue<PacketRecord>()
 
@@ -50,7 +51,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnManualSearch: Button
 
-    // 오디오 페어링 및 연결 감지 리시버
     private val connectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -66,13 +66,11 @@ class MainActivity : AppCompatActivity() {
                     isConnected = true
                     connectedDeviceName = getDeviceName(device)
                     addLog("⚡ [기기 연결 감지] $connectedDeviceName")
-
-                    // 연결 완료 직후 1초 간격 실시간 배터리 추적 루틴 작동
                     start1SecondBatteryPolling()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                     isConnected = false
-                    addLog("🔌 [기기 연결 해제] 주기적 업데이트 중단")
+                    addLog("🔌 [기기 연결 해제]")
                     stop1SecondBatteryPolling()
                 }
             }
@@ -88,7 +86,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Pro Realtime Monitor"
+            text = "AirPods Pro Monitor"
             textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 10)
@@ -103,7 +101,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "실시간 무필터 스캐너 대기 중"
+            text = "스캔 대기 중"
             textSize = 13f
             setPadding(0, 15, 0, 10)
         }
@@ -122,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 스마트 모니터링 로그 ---\n"
+            text = "--- 모니터링 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -155,7 +153,7 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("📡 무필터 고속 실시간 스캐너 가동")
+            addLog("📡 삼성 최적화 BLE 스캐너 가동")
             startRealtimeScan()
         } else {
             requestPermissions()
@@ -172,14 +170,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "실시간 BLE 수신 중..."
+        statusText.text = "애플 패킷 수신 중..."
+
+        // ★ 삼성 기기 필수: 0x004C 애플 제조사 필터 적용
+        val appleFilter = ScanFilter.Builder()
+            .setManufacturerData(0x004C, byteArrayOf())
+            .build()
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        // ScanFilter 없이 모든 BLE 수신 (갤럭시 누락 방지)
-        bluetoothLeScanner?.startScan(null, settings, scanCallback)
+        bluetoothLeScanner?.startScan(listOf(appleFilter), settings, scanCallback)
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -190,12 +192,11 @@ class MainActivity : AppCompatActivity() {
             val currentTime = System.currentTimeMillis()
             packetQueue.add(PacketRecord(currentTime, manuData, result.rssi))
 
-            // 15초 초과 패킷 자동 정리
             while (packetQueue.isNotEmpty() && (currentTime - (packetQueue.peek()?.timestamp ?: currentTime)) > 15000) {
                 packetQueue.poll()
             }
 
-            // 실시간 평문 패킷 검증 및 화면 반영
+            // 실시간 패킷 수신 시 즉시 화면 반영
             val batteryInfo = parseValidAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, _) = batteryInfo
@@ -204,34 +205,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 페어링 이후 1초 간격으로 BLE 링 버퍼를 역탐색하여 최신 배터리 갱신
     private fun start1SecondBatteryPolling() {
         stop1SecondBatteryPolling()
 
         batteryUpdateRunnable = object : Runnable {
             override fun run() {
                 if (!isConnected) return
-
-                val found = searchBatteryFromQueue()
-                if (found) {
-                    statusText.text = "연결됨: 1초 주기 최신 배터리 갱신 완료"
-                } else {
-                    statusText.text = "연결됨: 1초 주기 스캔 중 (수면/암호화 패킷 대기)"
-                }
-
+                searchBatteryFromQueue()
                 handler.postDelayed(this, 1000)
             }
         }
-
         handler.post(batteryUpdateRunnable!!)
     }
 
     private fun stop1SecondBatteryPolling() {
         batteryUpdateRunnable?.let { handler.removeCallbacks(it) }
         batteryUpdateRunnable = null
-        if (!isConnected) {
-            statusText.text = "대기 중 (연결 해제됨)"
-        }
     }
 
     private fun searchBatteryFromQueue(): Boolean {
@@ -242,7 +231,7 @@ class MainActivity : AppCompatActivity() {
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
                 updateUI(leftStr, rightStr, caseStr, record.rssi)
-                addLog("✅ [큐 최신 해독] L:$leftStr | R:$rightStr | Case:$caseStr (${record.rssi} dBm)")
+                addLog("✅ [해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${record.rssi} dBm)")
                 return true
             }
         }
@@ -258,8 +247,9 @@ class MainActivity : AppCompatActivity() {
                 • 오른쪽 (R): $rightStr
                 • 충전 케이스: $caseStr
                 
-                (신호 감도: $rssi dBm / 1초 주기 추적)
+                (신호 감도: $rssi dBm)
             """.trimIndent()
+            statusText.text = "연결됨: 실시간 추적 중"
         }
     }
 
@@ -283,16 +273,16 @@ class MainActivity : AppCompatActivity() {
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
-                        // 무효/암호화 더미 범위(11~14) 차단
-                        if (leftVal in 11..14 || rightVal in 11..14 || rawCase in 11..14) {
+                        // ★ 12~14 범위만 더미로 차단 (11은 100% 완충이므로 허용)
+                        if (leftVal in 12..14 || rightVal in 12..14 || rawCase in 12..14) {
                             i += if (subLen > 0) subLen + 2 else 1
                             continue
                         }
 
-                        val isLeftValid = leftVal in 0..10 || leftVal == 15
-                        val isRightValid = rightVal in 0..10 || rightVal == 15
-                        val isCaseValid = rawCase in 0..10 || rawCase == 15
-                        val hasRealBattery = leftVal in 0..10 || rightVal in 0..10 || rawCase in 0..10
+                        val isLeftValid = leftVal in 0..11 || leftVal == 15
+                        val isRightValid = rightVal in 0..11 || rightVal == 15
+                        val isCaseValid = rawCase in 0..11 || rawCase == 15
+                        val hasRealBattery = leftVal in 0..11 || rightVal in 0..11 || rawCase in 0..11
 
                         if (isLeftValid && isRightValid && isCaseValid && hasRealBattery) {
                             val chargeStatus = caseByte and 0x0F
@@ -329,6 +319,7 @@ class MainActivity : AppCompatActivity() {
         val chargeSymbol = if (isCharging) " ⚡(충전 중)" else ""
         return when (valRaw) {
             in 0..10 -> "${valRaw * 10}%$chargeSymbol"
+            11 -> "100%$chargeSymbol" // 완충 상태 (100%)
             15 -> "미연결/수면"
             else -> "알 수 없음 ($valRaw)"
         }
