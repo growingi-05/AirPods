@@ -3,7 +3,7 @@ name: Android CI Build
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: # 수동 실행 버튼 추가
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,11 +18,9 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-      continue-on-error: true
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
 
     - name: Build Debug APK
       run: gradle assembleDebug
