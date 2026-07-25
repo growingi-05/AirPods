@@ -1,3 +1,4 @@
+
 package com.example.galaxyairpods
 
 import android.Manifest
@@ -39,7 +40,7 @@ class MainActivity : AppCompatActivity() {
     private var connectedDeviceName: String = "내 AirPods Pro"
     private val handler = Handler(Looper.getMainLooper())
 
-    // 15초 이내에 수신된 패킷만 보관하는 메모리 링 버퍼 (Rolling Cache)
+    // 15초 이내 수신 패킷을 저장하는 메모리 링 버퍼 (Rolling Cache)
     private data class PacketRecord(val timestamp: Long, val data: ByteArray, val rssi: Int)
     private val packetQueue = ConcurrentLinkedQueue<PacketRecord>()
 
@@ -65,7 +66,6 @@ class MainActivity : AppCompatActivity() {
                     addLog("⚡ [기기 연결 감지] $connectedDeviceName")
                     addLog("🎯 링 버퍼에 저장된 직전 수초 간의 패킷 역참조 분석 시작...")
                     
-                    // 연결 직후 메모리 큐를 뒤져서 진짜 배터리 패킷 발굴
                     searchBatteryFromQueue()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 10)
         }
 
-        // 최상단 강조 배터리 정보 카드
+        // 최상단 배터리 정보 카드
         topResultCard = TextView(this).apply {
             text = "🎧 에어팟 연결 대기 중...\n(뚜껑을 열거나 연결을 시도하세요)"
             textSize = 15f
@@ -102,7 +102,7 @@ class MainActivity : AppCompatActivity() {
 
         statusText = TextView(this).apply {
             text = "상시 백그라운드 링 버퍼 대기 중"
-            textSize, textSize = 13f, 13f
+            textSize = 13f
             setPadding(0, 15, 0, 10)
         }
 
@@ -160,7 +160,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 상시 링 버퍼를 채우기 위한 연속 BLE 스캔 구동
     private fun startContinuousRingBufferScan() {
         if (isScanning) return
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner ?: return
@@ -189,18 +188,16 @@ class MainActivity : AppCompatActivity() {
             super.onScanResult(callbackType, result)
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
             
-            // 패킷을 수신한 즉시 메모리 큐(링 버퍼)에 보관
             val currentTime = System.currentTimeMillis()
             packetQueue.add(PacketRecord(currentTime, manuData, result.rssi))
 
-            // 15초 이상 지난 오래된 패킷은 큐에서 자동 제거 (메모리 관리)
-            while (packetQueue.isNotEmpty() && currentTime - packetQueue.peek().timestamp > 15000) {
+            // 15초 이상 지난 패킷 자동 정리
+            while (packetQueue.isNotEmpty() && (currentTime - (packetQueue.peek()?.timestamp ?: currentTime)) > 15000) {
                 packetQueue.poll()
             }
         }
     }
 
-    // 메모리 큐에 쌓인 패킷들을 역참조하여 평문 배터리 정보 발굴
     private fun searchBatteryFromQueue() {
         if (packetQueue.isEmpty()) {
             addLog("⚠️ 링 버퍼에 수집된 패킷이 없습니다. 뚜껑을 여닫아 주세요.")
@@ -208,7 +205,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         var foundValid = false
-        // 최신 패킷부터 역순으로 탐색
         val queueSnapshot = packetQueue.reversed()
 
         for (record in queueSnapshot) {
@@ -240,7 +236,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 평문 배터리 패킷 검증 및 해독 로직
     private fun parseValidAirPodsBatteryData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
@@ -261,7 +256,6 @@ class MainActivity : AppCompatActivity() {
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
-                        // 무효/암호화 더미 범위(11~14) 차단
                         if (leftVal in 11..14 || rightVal in 11..14 || rawCase in 11..14) {
                             i += if (subLen > 0) subLen + 2 else 1
                             continue
