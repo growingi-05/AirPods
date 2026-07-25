@@ -1,4 +1,3 @@
-
 package com.example.galaxyairpods
 
 import android.Manifest
@@ -30,17 +29,14 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsFix"
+    private val TAG = "AirPodsVerified"
     private val PERMISSION_REQUEST_CODE = 1001
-
-    // 신호 세기로 인한 통째로 버려짐 방지 (-95 dBm)
-    private val RSSI_THRESHOLD = -95
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var isScanning = false
     private var isConnected = false
-    
+
     private var connectedDeviceName: String = "AirPods Pro"
     private var totalApplePackets = 0
 
@@ -74,7 +70,7 @@ class MainActivity : AppCompatActivity() {
                     isConnected = true
                     val name = getDeviceName(device)
                     if (name.isNotBlank()) connectedDeviceName = name
-                    addLog("⚡ [기기 연결 완료] $connectedDeviceName")
+                    addLog("⚡ [기기 연결 감지] $connectedDeviceName")
                     start1SecondBatteryPolling()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
@@ -105,7 +101,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         topResultCard = TextView(this).apply {
-            text = "🎧 [$connectedDeviceName]\n에어팟 뚜껑을 열어 탐색해 주세요..."
+            text = "🎧 [$connectedDeviceName]\n에어팟 케이스 뚜껑을 닫았다가 다시 열어보세요..."
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(35, 35, 35, 35)
@@ -132,7 +128,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 진단 및 수신 로그 ---\n"
+            text = "--- 0x19 평문 패킷 검증 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -148,7 +144,7 @@ class MainActivity : AppCompatActivity() {
 
         btnManualSearch.setOnClickListener {
             if (checkPermissions()) {
-                addLog("👆 수동 해독 요청 (수신된 애플 패킷: $totalApplePackets 개 / 큐: ${packetQueue.size})")
+                addLog("👆 수동 해독 요청 (수신된 패킷: $totalApplePackets 개 / 큐: ${packetQueue.size})")
                 searchBatteryFromQueue()
             } else {
                 requestPermissions()
@@ -163,7 +159,7 @@ class MainActivity : AppCompatActivity() {
 
         if (checkPermissions()) {
             loadPairedAirPodsName()
-            addLog("📡 BLE 스캐너 가동 중...")
+            addLog("📡 BLE 정밀 스캐너 가동 중...")
             startRealtimeScan()
         } else {
             requestPermissions()
@@ -185,10 +181,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (name.contains("AirPods", ignoreCase = true) || name.contains("에어팟", ignoreCase = true)) {
                     connectedDeviceName = name
-                    addLog("📱 페어링된 기기 감지: $connectedDeviceName")
+                    addLog("📱 페어링된 기기 확인: $connectedDeviceName")
                     runOnUiThread {
                         if (lastValidLeft == null) {
-                            topResultCard.text = "🎧 [$connectedDeviceName]\n에어팟 뚜껑을 열어 탐색해 주세요..."
+                            topResultCard.text = "🎧 [$connectedDeviceName]\n에어팟 케이스 뚜껑을 닫았다가 열어보세요..."
                         }
                     }
                     return
@@ -209,7 +205,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "BLE 광고 패킷 수신 중..."
+        statusText.text = "BLE 광고 패킷 감지 중..."
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -222,8 +218,6 @@ class MainActivity : AppCompatActivity() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
 
-            if (result.rssi < RSSI_THRESHOLD) return
-
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
             totalApplePackets++
@@ -234,11 +228,7 @@ class MainActivity : AppCompatActivity() {
                 packetQueue.poll()
             }
 
-            if (totalApplePackets <= 3 || totalApplePackets % 15 == 0) {
-                addLog("📥 [Apple 패킷 수신 #$totalApplePackets] RSSI: ${result.rssi} dBm (큐: ${packetQueue.size})")
-            }
-
-            val batteryInfo = parseAirPodsProBatteryData(manuData)
+            val batteryInfo = parseStrictPlaintextBattery(manuData)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
 
@@ -247,8 +237,8 @@ class MainActivity : AppCompatActivity() {
                 lastValidCase = caseStr
 
                 updateUI(leftStr, rightStr, caseStr, result.rssi)
-                addLog("🎉 [배터리 해독 성공!] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
-                addLog("  └ Raw: $rawHex")
+                addLog("🎉 [0x19 평문 배터리 확정!] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
+                addLog("  └ Raw Hex: $rawHex")
             }
         }
 
@@ -281,7 +271,7 @@ class MainActivity : AppCompatActivity() {
         if (packetQueue.isEmpty()) return false
 
         for (record in packetQueue.reversed()) {
-            val batteryInfo = parseAirPodsProBatteryData(record.data)
+            val batteryInfo = parseStrictPlaintextBattery(record.data)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, _) = batteryInfo
                 lastValidLeft = leftStr
@@ -310,16 +300,23 @@ class MainActivity : AppCompatActivity() {
                 
                 (신호 감도: $rssi dBm)
             """.trimIndent()
-            statusText.text = "실시간 수신 반영 완료"
+            statusText.text = "평문 배터리 포착 완료"
         }
     }
 
-    private fun parseAirPodsProBatteryData(data: ByteArray): Quadruple<String, String, String, String>? {
+    // ★ 0x11(17바이트 암호화)은 철저히 무시하고, 0x19(25바이트 평문)만 엄격 해독하는 규격 함수
+    private fun parseStrictPlaintextBattery(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
             while (i < data.size - 5) {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
+
+                    // ★ 핵심 검증: 서브 패킷 길이가 0x11(17바이트)이거나 20바이트 미만이면 암호화 비콘이므로 Skip!
+                    if (subLen < 20 || subLen == 0x11) {
+                        i += if (subLen > 0) subLen + 2 else 1
+                        continue
+                    }
 
                     if (i + 5 < data.size) {
                         val statusByte = data[i + 3].toInt() and 0xFF
@@ -334,6 +331,7 @@ class MainActivity : AppCompatActivity() {
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
+                        // 난수 범위(12~14) 차단
                         if (leftVal in 12..14 || rightVal in 12..14 || rawCase in 12..14) {
                             i += if (subLen > 0) subLen + 2 else 1
                             continue
