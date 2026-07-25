@@ -28,7 +28,6 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
-
     private val SCAN_PERIOD: Long = 10000 
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -57,7 +56,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 뚜껑을 열고 스마트폰 가까이 대주세요."
+            text = "스마트폰 상단바 '위치(GPS)'를 켜고 진행해주세요."
             textSize = 15f
             setPadding(0, 0, 0, 20)
         }
@@ -67,13 +66,12 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 30, 0, 30)
         }
 
-        // 배터리 결과 표시 카드 UI
         batteryResultText = TextView(this).apply {
             text = "🎧 에어팟 뚜껑을 연 뒤 스캔을 눌러주세요."
-            textSize = 16f
+            textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(40, 40, 40, 40)
-            setBackgroundColor(0xFFE8F0FE.toInt()) // 연한 파란색 카드 배경
+            setPadding(30, 30, 30, 30)
+            setBackgroundColor(0xFFE8F0FE.toInt())
         }
 
         val scrollView = ScrollView(this).apply {
@@ -85,7 +83,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 상세 로그 ---\n"
+            text = "--- 수신된 Apple 신호 로그 ---\n"
             textSize = 12f
             setBackgroundColor(0x11000000)
         }
@@ -137,15 +135,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("스캔 시작... (스마트폰 바로 옆에 에어팟 뚜껑을 열어두세요)")
+        addLog("스캔 시작... (에어팟 뚜껑을 열어두세요)")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "근처 에어팟 탐색 중..."
+        statusText.text = "주변 Apple 신호 탐색 중..."
 
         handler.postDelayed({
             stopLeScan()
         }, SCAN_PERIOD)
 
+        // 모든 Apple 기기(0x004C) 신호 수신
         val appleFilter = ScanFilter.Builder()
             .setManufacturerData(0x004C, byteArrayOf()) 
             .build()
@@ -173,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         addLog("스캔 정지.")
         isScanning = false
         btnScan.text = "에어팟 스캔 시작"
-        statusText.text = "스캔 완료"
+        statusText.text = "스캔 탐색 완료"
         bluetoothLeScanner?.stopScan(scanCallback)
     }
 
@@ -189,12 +188,15 @@ class MainActivity : AppCompatActivity() {
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 1. 강한 신호 필터: 스마트폰 근처 기기만 (-65 dBm 이상)
-            if (rssi < -65) return
+            val deviceAddress = result.device.address
+            val dataHex = manuData.joinToString("") { "%02X ".format(it) }
 
-            // 2. 에어팟 배터리 패킷 확인 (0x07 프로토콜 및 25바이트 이상)
-            if (manuData.size >= 25 && manuData[0] == 0x07.toByte()) {
-                parseAirPodsBattery(manuData, result.device.address, rssi)
+            // 1. 단순 화면 로그 출력 (조건 없이 수신되는 모든 Apple 패킷 표시)
+            addLog("🍏 [Apple 신호 수신]\nAddress: $deviceAddress | RSSI: $rssi dBm\nLength: ${manuData.size} Bytes\nData: $dataHex")
+
+            // 2. 배터리 데이터 파싱 시도
+            if (manuData.size >= 15) {
+                parseAirPodsBattery(manuData, deviceAddress, rssi)
             }
         }
 
@@ -206,47 +208,51 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- 에어팟 배터리 파싱 핵심 함수 ---
     private fun parseAirPodsBattery(data: ByteArray, address: String, rssi: Int) {
         try {
-            // 에어팟 패킷의 배터리 영역 파싱 (Byte 6, 7)
-            val rawLeft = (data[6].toInt() and 0xF0) shr 4
-            val rawRight = data[6].toInt() and 0x0F
-            val rawCase = (data[7].toInt() and 0xF0) shr 4
-
-            // 좌우 유닛 반전 여부 체크 (Flip bit)
-            val isFlipped = (data[5].toInt() and 0x20) != 0
-            val leftVal = if (isFlipped) rawRight else rawLeft
-            val rightVal = if (isFlipped) rawLeft else rawRight
-
-            val leftStr = formatBattery(leftVal)
-            val rightStr = formatBattery(rightVal)
-            val caseStr = formatBattery(rawCase)
-
-            val displayText = """
-                🎉 [내 에어팟 감지 완료!]
-                
-                • 왼쪽 (L): $leftStr
-                • 오른쪽 (R): $rightStr
-                • 케이스: $caseStr
-                
-                (기기 주소: $address | 신호: $rssi dBm)
-            """.trimIndent()
-
-            runOnUiThread {
-                batteryResultText.text = displayText
+            // 패킷 형태 유연하게 대처 (Standard AirPod Pro/General packet parsing)
+            var bIndex = -1
+            for (i in 0 until data.size - 2) {
+                if (data[i] == 0x07.toByte()) {
+                    bIndex = i
+                    break
+                }
             }
 
-            addLog("배터리 감지 성공 -> L: $leftStr, R: $rightStr, Case: $caseStr")
+            if (bIndex != -1 && data.size > bIndex + 6) {
+                val rawLeft = (data[bIndex + 5].toInt() and 0xF0) shr 4
+                val rawRight = data[bIndex + 5].toInt() and 0x0F
+                val rawCase = (data[bIndex + 6].toInt() and 0xF0) shr 4
+
+                val isFlipped = (data[bIndex + 4].toInt() and 0x20) != 0
+                val leftVal = if (isFlipped) rawRight else rawLeft
+                val rightVal = if (isFlipped) rawLeft else rawRight
+
+                val leftStr = formatBattery(leftVal)
+                val rightStr = formatBattery(rightVal)
+                val caseStr = formatBattery(rawCase)
+
+                val displayText = """
+                    🎉 [에어팟 배터리 감지 성공!]
+                    • 왼쪽 (L): $leftStr
+                    • 오른쪽 (R): $rightStr
+                    • 케이스: $caseStr
+                    (신호 세기: $rssi dBm)
+                """.trimIndent()
+
+                runOnUiThread {
+                    batteryResultText.text = displayText
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "배터리 파싱 실패", e)
+            Log.e(TAG, "배터리 파싱 예외 발생", e)
         }
     }
 
     private fun formatBattery(valRaw: Int): String {
         return when (valRaw) {
             in 0..10 -> "${valRaw * 10}%"
-            15 -> "미연결 / 케이스 내부"
+            15 -> "케이스 내부 / 미연결"
             else -> "알 수 없음 ($valRaw)"
         }
     }
@@ -294,7 +300,7 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "권한 허용됨. 스캔 가능."
             } else {
                 statusText.text = "권한 거부됨. 스캔 불가."
-                Toast.makeText(this, "스캔을 위해 블루투스 권한이 필요합니다.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "스캔을 위해 위치 및 블루투스 권한이 필요합니다.", Toast.LENGTH_LONG).show()
             }
         }
     }
