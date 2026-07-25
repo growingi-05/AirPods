@@ -74,12 +74,10 @@ class MainActivity : AppCompatActivity() {
                         activeDeviceName = fetchedName
                     }
                     addLog("⚡ [실시간 기기 연결 완료] $activeDeviceName")
-                    start1SecondBatteryPolling()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
                     isConnected = false
                     addLog("🔌 [기기 연결 해제]")
-                    stop1SecondBatteryPolling()
                 }
             }
         }
@@ -147,8 +145,12 @@ class MainActivity : AppCompatActivity() {
 
         btnManualSearch.setOnClickListener {
             if (checkPermissions()) {
-                addLog("👆 수동 해독 요청 (수신된 패킷: $totalApplePackets 개 / 큐: ${packetQueue.size})")
-                searchBatteryFromQueue()
+                val found = searchBatteryFromQueue()
+                if (found) {
+                    addLog("👆 수동 해독 성공! (수신된 패킷: $totalApplePackets 개 / 큐: ${packetQueue.size})")
+                } else {
+                    addLog("👆 수동 해독 실패 - 큐에 가짜(암호화) 패킷만 존재합니다.")
+                }
             } else {
                 requestPermissions()
             }
@@ -164,6 +166,7 @@ class MainActivity : AppCompatActivity() {
             initDeviceNameFromBonded()
             addLog("📡 BLE 스캐너 가동 중...")
             startRealtimeScan()
+            start1SecondBatteryPolling() // 항상 1초마다 큐를 뒤지도록 실행
         } else {
             requestPermissions()
         }
@@ -241,8 +244,7 @@ class MainActivity : AppCompatActivity() {
                 lastValidCase = caseStr
 
                 updateUI(leftStr, rightStr, caseStr, result.rssi)
-                addLog("🎉 [배터리 해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
-                addLog("  └ Raw: $rawHex")
+                addLog("🎉 [실시간 해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
             }
         }
 
@@ -258,7 +260,6 @@ class MainActivity : AppCompatActivity() {
 
         batteryUpdateRunnable = object : Runnable {
             override fun run() {
-                if (!isConnected) return
                 searchBatteryFromQueue()
                 handler.postDelayed(this, 1000)
             }
@@ -300,23 +301,17 @@ class MainActivity : AppCompatActivity() {
                 
                 (신호 감도: $rssi dBm)
             """.trimIndent()
-            statusText.text = "실시간 수신 완료"
+            statusText.text = "해독 완료 (최근 업데이트 적용됨)"
         }
     }
 
+    // 🚨 완전히 새로워진 1바이트 슬라이딩 윈도우 무식 파싱!
     private fun parseAirPodsBatteryData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
-            var i = 0
-            while (i <= data.size - 6) {
+            // 패킷 끝까지 1바이트씩 전진하며 0x07을 찾습니다. (길이 계산 후 점프 금지)
+            for (i in 0..data.size - 6) {
                 if (data[i] == 0x07.toByte()) {
-                    val subLen = data[i + 1].toInt() and 0xFF
-
-                    // 🚨 치명적이었던 0x11 길이 제한 완전히 삭제! 최소 바이트 수만 검증
-                    if (subLen < 5) {
-                        i += subLen + 2
-                        continue
-                    }
-
+                    
                     val statusByte = data[i + 3].toInt() and 0xFF
                     val earbudByte = data[i + 4].toInt() and 0xFF
                     val caseByte = data[i + 5].toInt() and 0xFF
@@ -329,7 +324,11 @@ class MainActivity : AppCompatActivity() {
                     val leftVal = if (isFlipped) rawRight else rawLeft
                     val rightVal = if (isFlipped) rawLeft else rawRight
 
-                    // 오직 유효한 배터리 수치(0~11, 15)인지만 검증 (암호화된 더미 12, 13, 14는 여기서 자연스럽게 차단됨)
+                    // 암호화된 가짜 패킷(12, 13, 14)이 하나라도 섞여 있다면 즉시 버리고 다음 바이트 탐색
+                    if (leftVal in 12..14 || rightVal in 12..14 || rawCase in 12..14) {
+                        continue 
+                    }
+
                     val isLeftValid = leftVal in 0..11 || leftVal == 15
                     val isRightValid = rightVal in 0..11 || rightVal == 15
                     val isCaseValid = rawCase in 0..11 || rawCase == 15
@@ -350,16 +349,10 @@ class MainActivity : AppCompatActivity() {
                         val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
                         val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
 
-                        val endIdx = minOf(i + 2 + subLen, data.size)
-                        val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
+                        val rawHex = data.copyOfRange(i, minOf(i + 18, data.size)).joinToString(" ") { "%02X".format(it) }
 
                         return Quadruple(leftStr, rightStr, caseStr, rawHex)
                     }
-
-                    i += subLen + 2
-                } else {
-                    val subLen = data[i + 1].toInt() and 0xFF
-                    i += if (subLen > 0) subLen + 2 else 1
                 }
             }
         } catch (e: Exception) {
@@ -438,6 +431,7 @@ class MainActivity : AppCompatActivity() {
                 addLog("✅ 권한 승인 완료!")
                 initDeviceNameFromBonded()
                 startRealtimeScan()
+                start1SecondBatteryPolling()
             } else {
                 addLog("❌ 필수 권한이 거부되었습니다.")
             }
