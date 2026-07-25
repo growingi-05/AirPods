@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
@@ -170,7 +171,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 초기 실행 시 등록된 기기 이름 임시 가져오기 (연결 시 실제 이름으로 자동 교체됨)
     private fun initDeviceNameFromBonded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
@@ -208,11 +208,18 @@ class MainActivity : AppCompatActivity() {
         isScanning = true
         statusText.text = "BLE 패킷 수신 중..."
 
+        // 🚨 수정된 부분: 애플(0x004C) 전용 스캔 필터 추가 (갤럭시 통신 차단 방지)
+        val filters = listOf(
+            ScanFilter.Builder()
+                .setManufacturerData(0x004C, byteArrayOf())
+                .build()
+        )
+
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        bluetoothLeScanner?.startScan(null, settings, scanCallback)
+        bluetoothLeScanner?.startScan(filters, settings, scanCallback)
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -229,7 +236,6 @@ class MainActivity : AppCompatActivity() {
                 packetQueue.poll()
             }
 
-            // 실시간 수신 패킷 해독
             val batteryInfo = parseAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
@@ -306,13 +312,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 패킷 길이 제한을 완전 제거하고 모든 0x07 패킷을 해독
     private fun parseAirPodsBatteryData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
             while (i <= data.size - 6) {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
+
+                    // 🚨 수정된 부분: 17바이트(0x11) 암호화 패킷 무시, 평문 패킷(0x18, 0x19 등)만 허용
+                    if (subLen == 0x11 || subLen < 0x18) {
+                        i += subLen + 2
+                        continue
+                    }
 
                     val statusByte = data[i + 3].toInt() and 0xFF
                     val earbudByte = data[i + 4].toInt() and 0xFF
@@ -344,13 +355,13 @@ class MainActivity : AppCompatActivity() {
                         val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
                         val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
 
-                        val endIdx = minOf(i + 2 + (if (subLen > 0) subLen else 15), data.size)
+                        val endIdx = minOf(i + 2 + subLen, data.size)
                         val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
 
                         return Quadruple(leftStr, rightStr, caseStr, rawHex)
                     }
 
-                    i += if (subLen > 0) subLen + 2 else 1
+                    i += subLen + 2
                 } else {
                     val subLen = data[i + 1].toInt() and 0xFF
                     i += if (subLen > 0) subLen + 2 else 1
