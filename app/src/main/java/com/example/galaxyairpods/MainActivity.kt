@@ -23,15 +23,12 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
-    private val SCAN_PERIOD: Long = 15000 // 15초 스캔
+    private val SCAN_PERIOD: Long = 12000 
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
@@ -39,68 +36,63 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
 
     private lateinit var statusText: TextView
+    private lateinit var batteryResultText: TextView
     private lateinit var logText: TextView
     private lateinit var btnScan: Button
-    private lateinit var btnClear: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 80, 40, 40)
+            setPadding(50, 100, 50, 50)
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Pro 3 Raw Packet Dumper"
-            textSize = 20f
+            text = "Galaxy AirPods Controller"
+            textSize = 24f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(0, 0, 0, 15)
+            setPadding(0, 0, 0, 20)
         }
 
         statusText = TextView(this).apply {
-            text = "뚜껑을 닫았다가 스캔 시작 후 열어주세요."
-            textSize = 14f
-            setPadding(0, 0, 0, 15)
-        }
-
-        val btnLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            text = "에어팟 뚜껑을 연 뒤 스캔을 눌러주세요."
+            textSize = 15f
+            setPadding(0, 0, 0, 20)
         }
 
         btnScan = Button(this).apply {
-            text = "Raw 스캔 시작"
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f)
+            text = "에어팟 배터리 스캔"
+            setPadding(0, 30, 0, 30)
         }
 
-        btnClear = Button(this).apply {
-            text = "로그 지우기"
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setOnClickListener { logText.text = "--- Raw Packet Log ---\n" }
+        batteryResultText = TextView(this).apply {
+            text = "🎧 에어팟 뚜껑을 열고 스캔을 시작하세요."
+            textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(40, 40, 40, 40)
+            setBackgroundColor(0xFFE8F0FE.toInt())
         }
-
-        btnLayout.addView(btnScan)
-        btnLayout.addView(btnClear)
 
         val scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0, 1.0f
             )
-            setPadding(0, 20, 0, 0)
+            setPadding(0, 30, 0, 0)
         }
 
         logText = TextView(this).apply {
-            text = "--- Raw Packet Log ---\n"
-            textSize = 11f
+            text = "--- 배터리 탐색 로그 ---\n"
+            textSize = 12f
             setBackgroundColor(0x11000000)
-            setTextIsSelectable(true) // 모바일에서 텍스트 복사 가능
         }
         scrollView.addView(logText)
 
         rootLayout.addView(titleText)
         rootLayout.addView(statusText)
-        rootLayout.addView(btnLayout)
+        rootLayout.addView(btnScan)
+        rootLayout.addView(batteryResultText)
         rootLayout.addView(scrollView)
         setContentView(rootLayout)
 
@@ -143,10 +135,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("▶ 스캔 시작! 지금 에어팟 뚜껑을 열어주세요.")
+        addLog("🔍 탐색 시작 (에어팟 뚜껑을 연 상태 유지)")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "Apple Raw 패킷 수집 중..."
+        statusText.text = "에어팟 프로3 배터리 데이터 분석 중..."
 
         handler.postDelayed({
             stopLeScan()
@@ -176,10 +168,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("⏹ 스캔 정지.")
+        addLog("스캔 정지.")
         isScanning = false
-        btnScan.text = "Raw 스캔 시작"
-        statusText.text = "스캔 완료. 로그에서 뚜껑 연 직후 데이터를 확인하세요."
+        btnScan.text = "에어팟 배터리 스캔"
+        statusText.text = "스캔 완료"
         bluetoothLeScanner?.stopScan(scanCallback)
     }
 
@@ -195,11 +187,8 @@ class MainActivity : AppCompatActivity() {
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 조건 0%: 필터링 없이 수신되는 모든 Apple 패킷의 Raw Hex를 시간과 함께 출력
-            val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
-            val hexData = manuData.joinToString(" ") { "%02X".format(it) }
-
-            addLog("[$timeStr] RSSI:$rssi | Len:${manuData.size}B\nHex: $hexData\n")
+            // 포착된 패킷 구조 해독
+            parseAirPodsProPacket(manuData, rssi)
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -207,6 +196,66 @@ class MainActivity : AppCompatActivity() {
             addLog("스캔 실패: 오류 코드 $errorCode")
             statusText.text = "스캔 실패"
             stopLeScan()
+        }
+    }
+
+    // --- 에어팟 프로3 패킷 정밀 해독 함수 ---
+    private fun parseAirPodsProPacket(data: ByteArray, rssi: Int) {
+        try {
+            // 패킷 내부에서 [0x07, 0x11] (Proximity Header + Length 17) 탐색
+            var startIdx = -1
+            for (i in 0 until data.size - 5) {
+                if (data[i] == 0x07.toByte() && data[i + 1] == 0x11.toByte()) {
+                    startIdx = i
+                    break
+                }
+            }
+
+            if (startIdx != -1 && data.size >= startIdx + 6) {
+                val statusByte = data[startIdx + 3].toInt() and 0xFF
+                val earbudByte = data[startIdx + 4].toInt() and 0xFF
+                val caseByte = data[startIdx + 5].toInt() and 0xFF
+
+                // 니블(Nibble) 단위 배터리 값 추출
+                val rawLeft = (earbudByte and 0xF0) shr 4
+                val rawRight = earbudByte and 0x0F
+                val rawCase = (caseByte and 0xF0) shr 4
+
+                // 반전(Flip) 비트 확인
+                val isFlipped = (statusByte and 0x20) != 0
+                val leftVal = if (isFlipped) rawRight else rawLeft
+                val rightVal = if (isFlipped) rawLeft else rawRight
+
+                val leftStr = formatBattery(leftVal)
+                val rightStr = formatBattery(rightVal)
+                val caseStr = formatBattery(rawCase)
+
+                val displayText = """
+                    🎉 [에어팟 프로3 감지 성공!]
+                    
+                    • 왼쪽 유닛 (L): $leftStr
+                    • 오른쪽 유닛 (R): $rightStr
+                    • 충전 케이스: $caseStr
+                    
+                    (신호 세기: $rssi dBm)
+                """.trimIndent()
+
+                runOnUiThread {
+                    batteryResultText.text = displayText
+                }
+
+                addLog("✅ [해독 성공] L: $leftStr, R: $rightStr, Case: $caseStr (RSSI: $rssi)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "배터리 해독 실패", e)
+        }
+    }
+
+    private fun formatBattery(valRaw: Int): String {
+        return when (valRaw) {
+            in 0..10 -> "${valRaw * 10}%"
+            15 -> "케이스 내부 / 미연결"
+            else -> "알 수 없음 ($valRaw)"
         }
     }
 
