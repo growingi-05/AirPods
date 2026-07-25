@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 연결 시 자동으로 배터리를 탐색합니다."
+            text = "에어팟 뚜껑을 연 뒤 배터리를 탐색하세요."
             textSize = 14f
             setPadding(0, 0, 0, 15)
         }
@@ -112,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 필터링 해독 로그 ---\n"
+            text = "--- 배터리 모니터링 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -145,7 +145,7 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("📡 모니터 활성화 (RSSI: $RSSI_THRESHOLD dBm)")
+            addLog("📡 배터리 모니터 활성화 (RSSI: $RSSI_THRESHOLD dBm)")
             startTargetedBleScan()
         } else {
             requestPermissions()
@@ -162,12 +162,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("🔍 [BLE 탐색 시작]")
+        addLog("🔍 [BLE 스캔 시작] 뚜껑을 연 상태로 탐색하세요...")
         isScanning = true
         statusText.text = "배터리 신호 탐색 중..."
 
         handler.removeCallbacksAndMessages(null)
-        handler.postDelayed({ stopBleScan() }, 8000) // 8초 스캔
+        handler.postDelayed({ stopBleScan() }, 8000)
 
         val appleFilter = ScanFilter.Builder()
             .setManufacturerData(0x004C, byteArrayOf())
@@ -200,43 +200,36 @@ class MainActivity : AppCompatActivity() {
 
             if (rssi < RSSI_THRESHOLD) return
 
-            val batteryInfo = parseAirPodsBatteryData(manuData)
+            val batteryInfo = parseAirPodsProData(manuData)
             if (batteryInfo != null) {
-                val (leftStr, rightStr, caseStr, rawHex, modelId) = batteryInfo
+                val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
                 val displayName = connectedDeviceName ?: "더혀니의 AirPods Pro"
 
                 runOnUiThread {
                     batteryResultText.text = """
-                        🎉 [$displayName 배터리 정보]
+                        🎉 [$displayName 배터리 수신]
                         
                         • 왼쪽 (L): $leftStr
                         • 오른쪽 (R): $rightStr
                         • 충전 케이스: $caseStr
                         
-                        (Model: 0x${"%02X".format(modelId)} | $rssi dBm)
+                        (신호 강도: $rssi dBm)
                     """.trimIndent()
                 }
 
-                addLog("✅ [포착 성공] Model:0x${"%02X".format(modelId)} | L:$leftStr | R:$rightStr | Case:$caseStr ($rssi dBm)")
-                addLog("  └ Hex: $rawHex")
+                addLog("✅ [포착 성공] $displayName | L:$leftStr | R:$rightStr | Case:$caseStr ($rssi dBm)")
+                addLog("  └ Raw Hex: $rawHex")
                 stopBleScan()
             }
         }
     }
 
-    private fun parseAirPodsBatteryData(data: ByteArray): Quintuple<String, String, String, String, Int>? {
+    private fun parseAirPodsProData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
             while (i < data.size - 5) {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
-                    val modelId = data[i + 2].toInt() and 0xFF
-
-                    // Model ID가 0x06 (암호화/연결유지용 비콘)인 경우 배터리 패킷이 아니므로 무시
-                    if (modelId == 0x06) {
-                        i += if (subLen > 0) subLen + 2 else 1
-                        continue
-                    }
 
                     if (i + 5 < data.size) {
                         val statusByte = data[i + 3].toInt() and 0xFF
@@ -266,9 +259,8 @@ class MainActivity : AppCompatActivity() {
                         val endIdx = minOf(i + 2 + subLen, data.size)
                         val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
 
-                        // 0~10 범위 수치가 포함된 패킷만 반환
                         if (leftVal in 0..10 || rightVal in 0..10 || rawCase in 0..10) {
-                            return Quintuple(leftStr, rightStr, caseStr, rawHex, modelId)
+                            return Quadruple(leftStr, rightStr, caseStr, rawHex)
                         }
                     }
                     i += if (subLen > 0) subLen + 2 else 1
@@ -349,4 +341,4 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-data class Quintuple<A, B, C, D, E>(val first: A, val second: B, val third: C, val fourth: D, val fifth: E)
+data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
