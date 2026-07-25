@@ -28,7 +28,7 @@ class MainActivity : AppCompatActivity() {
 
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
-    private val SCAN_PERIOD: Long = 12000 
+    private val SCAN_PERIOD: Long = 15000 
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
@@ -45,32 +45,32 @@ class MainActivity : AppCompatActivity() {
 
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 100, 50, 50)
+            setPadding(40, 80, 40, 40)
         }
 
         val titleText = TextView(this).apply {
-            text = "Galaxy AirPods Controller"
-            textSize = 24f
+            text = "AirPods Pro 3 Debugger"
+            textSize = 22f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(0, 0, 0, 20)
+            setPadding(0, 0, 0, 15)
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 뚜껑을 연 뒤 스캔을 눌러주세요."
-            textSize = 15f
-            setPadding(0, 0, 0, 20)
+            text = "에어팟 뚜껑을 열고 스캔을 시작하세요."
+            textSize = 14f
+            setPadding(0, 0, 0, 15)
         }
 
         btnScan = Button(this).apply {
-            text = "에어팟 배터리 스캔"
+            text = "디버그 스캔 시작"
             setPadding(0, 30, 0, 30)
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 에어팟 뚜껑을 열고 스캔을 시작하세요."
-            textSize = 16f
+            text = "🎧 패킷 분석 대기 중..."
+            textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(40, 40, 40, 40)
+            setPadding(30, 30, 30, 30)
             setBackgroundColor(0xFFE8F0FE.toInt())
         }
 
@@ -79,13 +79,14 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0, 1.0f
             )
-            setPadding(0, 30, 0, 0)
+            setPadding(0, 20, 0, 0)
         }
 
         logText = TextView(this).apply {
-            text = "--- 배터리 탐색 로그 ---\n"
-            textSize = 12f
+            text = "--- 디버그 로그 ---\n"
+            textSize = 11f
             setBackgroundColor(0x11000000)
+            setTextIsSelectable(true)
         }
         scrollView.addView(logText)
 
@@ -135,10 +136,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("🔍 탐색 시작 (에어팟 뚜껑을 연 상태 유지)")
+        addLog("▶ 스캔 시작! 에어팟 뚜껑을 열어주세요.")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "에어팟 프로3 배터리 데이터 분석 중..."
+        statusText.text = "패킷 분석 중..."
 
         handler.postDelayed({
             stopLeScan()
@@ -164,13 +165,13 @@ class MainActivity : AppCompatActivity() {
         if (!isScanning) return
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             return
         }
 
-        addLog("스캔 정지.")
+        addLog("⏹ 스캔 정지.")
         isScanning = false
-        btnScan.text = "에어팟 배터리 스캔"
+        btnScan.text = "디버그 스캔 시작"
         statusText.text = "스캔 완료"
         bluetoothLeScanner?.stopScan(scanCallback)
     }
@@ -186,26 +187,28 @@ class MainActivity : AppCompatActivity() {
 
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
+            val hexStr = manuData.joinToString(" ") { "%02X".format(it) }
 
-            // 포착된 패킷 구조 해독
-            parseAirPodsProPacket(manuData, rssi)
+            // 수신된 패킷을 화면에 전부 출력하여 확인
+            addLog("RX (RSSI:$rssi): $hexStr")
+
+            parseAndShowBattery(manuData, rssi)
         }
 
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
-            addLog("스캔 실패: 오류 코드 $errorCode")
+            addLog("스캔 실패: $errorCode")
             statusText.text = "스캔 실패"
             stopLeScan()
         }
     }
 
-    // --- 에어팟 프로3 패킷 정밀 해독 함수 ---
-    private fun parseAirPodsProPacket(data: ByteArray, rssi: Int) {
+    private fun parseAndShowBattery(data: ByteArray, rssi: Int) {
         try {
-            // 패킷 내부에서 [0x07, 0x11] (Proximity Header + Length 17) 탐색
             var startIdx = -1
-            for (i in 0 until data.size - 5) {
-                if (data[i] == 0x07.toByte() && data[i + 1] == 0x11.toByte()) {
+            for (i in 0 until data.size - 2) {
+                // 0x07 패킷 탐색
+                if (data[i] == 0x07.toByte()) {
                     startIdx = i
                     break
                 }
@@ -216,12 +219,10 @@ class MainActivity : AppCompatActivity() {
                 val earbudByte = data[startIdx + 4].toInt() and 0xFF
                 val caseByte = data[startIdx + 5].toInt() and 0xFF
 
-                // 니블(Nibble) 단위 배터리 값 추출
                 val rawLeft = (earbudByte and 0xF0) shr 4
                 val rawRight = earbudByte and 0x0F
                 val rawCase = (caseByte and 0xF0) shr 4
 
-                // 반전(Flip) 비트 확인
                 val isFlipped = (statusByte and 0x20) != 0
                 val leftVal = if (isFlipped) rawRight else rawLeft
                 val rightVal = if (isFlipped) rawLeft else rawRight
@@ -230,32 +231,27 @@ class MainActivity : AppCompatActivity() {
                 val rightStr = formatBattery(rightVal)
                 val caseStr = formatBattery(rawCase)
 
-                val displayText = """
-                    🎉 [에어팟 프로3 감지 성공!]
-                    
-                    • 왼쪽 유닛 (L): $leftStr
-                    • 오른쪽 유닛 (R): $rightStr
-                    • 충전 케이스: $caseStr
-                    
-                    (신호 세기: $rssi dBm)
+                val resultMsg = """
+                    🎉 [배터리 해독 성공!]
+                    • L: $leftStr | R: $rightStr | Case: $caseStr
+                    • Raw Bytes: L=$rawLeft, R=$rawRight, Case=$rawCase (RSSI: $rssi)
                 """.trimIndent()
 
                 runOnUiThread {
-                    batteryResultText.text = displayText
+                    batteryResultText.text = resultMsg
                 }
-
-                addLog("✅ [해독 성공] L: $leftStr, R: $rightStr, Case: $caseStr (RSSI: $rssi)")
+                addLog(">>> 성공! L:$leftStr R:$rightStr Case:$caseStr")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "배터리 해독 실패", e)
+            addLog("파싱 오류: ${e.message}")
         }
     }
 
     private fun formatBattery(valRaw: Int): String {
         return when (valRaw) {
             in 0..10 -> "${valRaw * 10}%"
-            15 -> "케이스 내부 / 미연결"
-            else -> "알 수 없음 ($valRaw)"
+            15 -> "미연결/케이스 안"
+            else -> "$valRaw"
         }
     }
 
@@ -277,7 +273,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
         return permissions.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -291,26 +286,15 @@ class MainActivity : AppCompatActivity() {
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
         ActivityCompat.requestPermissions(this, permissions.toTypedArray(), PERMISSION_REQUEST_CODE)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                statusText.text = "권한 허용됨."
-            } else {
-                statusText.text = "권한 거부됨."
-                Toast.makeText(this, "권한이 필요합니다.", Toast.LENGTH_LONG).show()
-            }
-        }
+        // 생략 가능
     }
 
     override fun onPause() {
         super.onPause()
-        if (isScanning) {
-            stopLeScan()
-        }
+        if (isScanning) stopLeScan()
     }
 }
