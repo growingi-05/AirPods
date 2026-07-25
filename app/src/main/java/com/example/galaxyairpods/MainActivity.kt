@@ -2,22 +2,16 @@ package com.example.galaxyairpods
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.widget.Button
 import android.widget.LinearLayout
@@ -63,7 +57,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "스캔 준비 중... (가까운 기기의 원본 패킷만 잡습니다)"
+            text = "스캔 준비 중... (애플 기기의 모든 원본 패킷 수신 중)"
             textSize = 14f
             setPadding(0, 15, 0, 10)
         }
@@ -118,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "패킷 추적 중... (RSSI -80 이상만 표시)"
+        statusText.text = "패킷 추적 중... (필터 완전 해제)"
 
         val filters = listOf(
             ScanFilter.Builder()
@@ -137,19 +131,18 @@ class MainActivity : AppCompatActivity() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
 
-            // 🚨 신호가 너무 약한(멀리 있는) 남의 에어팟은 무시 (-80 기준)
-            if (result.rssi < -80) return
-
+            // 🚨 1. RSSI(신호 강도) 제한 완전히 삭제! 멀리 있는 것도 일단 다 잡아!
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 0x07로 시작하는 에어팟 비콘 데이터만 추출
-            if (manuData.isNotEmpty() && manuData[0] == 0x07.toByte()) {
+            // 🚨 2. 0x07로 시작해야 한다는 조건도 완전히 삭제! 데이터가 있으면 무조건 찍기!
+            if (manuData.isNotEmpty()) {
                 val hexString = manuData.joinToString(" ") { "%02X".format(it) }
 
-                // 화면이 미친 듯이 올라가는 것을 방지 (새로운 패턴의 패킷만 화면에 출력)
+                // 화면 미친듯이 올라가는 것만 방지
                 if (!lastSeenHex.contains(hexString)) {
                     lastSeenHex.add(hexString)
-                    if (lastSeenHex.size > 20) {
+                    // 너무 많이 쌓이면 오래된 것 삭제
+                    if (lastSeenHex.size > 30) {
                         lastSeenHex.poll()
                     }
                     addLog("📡 [${result.rssi}dBm] $hexString")
