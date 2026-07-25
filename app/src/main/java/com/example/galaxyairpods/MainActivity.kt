@@ -2,18 +2,17 @@ package com.example.galaxyairpods
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.BluetoothLeScanner
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
+import android.bluetooth.BluetoothProfile
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.widget.Button
 import android.widget.LinearLayout
@@ -26,19 +25,74 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsScanner"
+    private val TAG = "AirPodsConnected"
     private val PERMISSION_REQUEST_CODE = 1001
-    private val SCAN_PERIOD: Long = 15000 
 
     private var bluetoothAdapter: BluetoothAdapter? = null
-    private var bluetoothLeScanner: BluetoothLeScanner? = null
-    private var isScanning = false
-    private val handler = Handler(Looper.getMainLooper())
+    private var bluetoothHeadset: BluetoothHeadset? = null
 
     private lateinit var statusText: TextView
     private lateinit var batteryResultText: TextView
     private lateinit var logText: TextView
-    private lateinit var btnScan: Button
+    private lateinit var btnRefresh: Button
+
+    // 블루투스 방송 리시버
+    private val bluetoothReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            
+            when (action) {
+                // 1. 안드로이드 표준 블루투스 기기 배터리 잔량 변경 이벤트
+                BluetoothDevice.ACTION_BATTERY_LEVEL_CHANGED -> {
+                    val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    }
+                    val batteryLevel = intent.getIntExtra("android.bluetooth.device.extra.BATTERY_LEVEL", -1)
+                    
+                    if (device != null && batteryLevel != -1) {
+                        val deviceName = getDeviceName(device)
+                        addLog("🔋 [배터리 변경 감지] $deviceName -> $batteryLevel%")
+                        updateBatteryUI(deviceName, batteryLevel)
+                    }
+                }
+
+                // 2. 애플 전용 AT 커맨드 헤드셋 이벤트 (+IPHONEACCEV)
+                BluetoothHeadset.ACTION_VENDOR_SPECIFIC_HEADSET_EVENT -> {
+                    val command = intent.getStringExtra(BluetoothHeadset.EXTRA_VENDOR_SPECIFIC_HEADSET_EVENT_CMD)
+                    addLog("📡 [애플 헤드셋 이벤트 수신] Cmd: $command")
+                    checkConnectedDeviceBattery()
+                }
+
+                // 3. 연결 상태 변경 이벤트
+                BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED,
+                BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                    addLog("🔄 블루투스 연결 상태 변경됨")
+                    checkConnectedDeviceBattery()
+                }
+            }
+        }
+    }
+
+    // BluetoothHeadset 프로필 서비스 연결 콜백
+    private val profileListener = object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile?) {
+            if (profile == BluetoothProfile.HEADSET) {
+                bluetoothHeadset = proxy as BluetoothHeadset
+                addLog("✅ Headset 서비스 프로필 연결 완료")
+                checkConnectedDeviceBattery()
+            }
+        }
+
+        override fun onServiceDisconnected(profile: Int) {
+            if (profile == BluetoothProfile.HEADSET) {
+                bluetoothHeadset = null
+                addLog("❌ Headset 서비스 프로필 해제됨")
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,28 +103,28 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Pro 3 Controller"
+            text = "Connected AirPods Monitor"
             textSize = 22f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 15)
         }
 
         statusText = TextView(this).apply {
-            text = "스캔 시작 버튼을 누른 후 뚜껑을 열어주세요."
+            text = "연결된 에어팟의 배터리 상태를 모니터링합니다."
             textSize = 14f
             setPadding(0, 0, 0, 15)
         }
 
-        btnScan = Button(this).apply {
-            text = "스캔 시작"
+        btnRefresh = Button(this).apply {
+            text = "연결 기기 배터리 즉시 조회"
             setPadding(0, 30, 0, 30)
         }
 
         batteryResultText = TextView(this).apply {
-            text = "🎧 근처 에어팟 신호를 대기 중입니다..."
-            textSize = 15f
+            text = "🎧 에어팟 연결 상태를 확인하는 중..."
+            textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(30, 30, 30, 30)
+            setPadding(40, 40, 40, 40)
             setBackgroundColor(0xFFE8F0FE.toInt())
         }
 
@@ -83,7 +137,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 감지 로그 ---\n"
+            text = "--- 시스템 이벤트 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -92,7 +146,7 @@ class MainActivity : AppCompatActivity() {
 
         rootLayout.addView(titleText)
         rootLayout.addView(statusText)
-        rootLayout.addView(btnScan)
+        rootLayout.addView(btnRefresh)
         rootLayout.addView(batteryResultText)
         rootLayout.addView(scrollView)
         setContentView(rootLayout)
@@ -100,158 +154,103 @@ class MainActivity : AppCompatActivity() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager.adapter
 
-        if (bluetoothAdapter == null) {
-            statusText.text = "오류: 블루투스 미지원 기기"
-            btnScan.isEnabled = false
-            return
-        }
-
-        btnScan.setOnClickListener {
-            if (isScanning) {
-                stopLeScan()
+        btnRefresh.setOnClickListener {
+            if (checkPermissions()) {
+                checkConnectedDeviceBattery()
             } else {
-                startLeScanWithPermissionCheck()
+                requestPermissions()
             }
         }
-    }
 
-    private fun startLeScanWithPermissionCheck() {
         if (checkPermissions()) {
-            if (bluetoothAdapter?.isEnabled == false) {
-                Toast.makeText(this, "블루투스를 켜주세요.", Toast.LENGTH_SHORT).show()
-                return
-            }
-            bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-            startLeScan()
+            initBluetoothProfileAndReceiver()
         } else {
             requestPermissions()
         }
     }
 
-    private fun startLeScan() {
-        if (isScanning) return
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-            return
+    private fun initBluetoothProfileAndReceiver() {
+        // Headset Profile 프록시 요청
+        bluetoothAdapter?.getProfileProxy(this, profileListener, BluetoothProfile.HEADSET)
+
+        // 시스템 브로드캐스트 필터 등록
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_BATTERY_LEVEL_CHANGED)
+            addAction(BluetoothHeadset.ACTION_VENDOR_SPECIFIC_HEADSET_EVENT)
+            addCategory(BluetoothHeadset.VENDOR_SPECIFIC_HEADSET_EVENT_COMPANY_BASE_OF_CLASS_BLUETOOTH + 76) // Apple Company ID (0x004C = 76)
+            addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
         }
-
-        addLog("▶ 스캔 시작! (지금 에어팟 뚜껑을 열어주세요)")
-        isScanning = true
-        btnScan.text = "스캔 정지"
-        statusText.text = "근처 에어팟 신호 수신 중..."
-
-        handler.postDelayed({
-            stopLeScan()
-        }, SCAN_PERIOD)
-
-        val appleFilter = ScanFilter.Builder()
-            .setManufacturerData(0x004C, byteArrayOf()) 
-            .build()
         
-        val filters = listOf(appleFilter)
-
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-             settings.setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(bluetoothReceiver, filter)
         }
-            
-        bluetoothLeScanner?.startScan(filters, settings.build(), scanCallback)
+        
+        addLog("📡 시스템 배터리 이벤트 리시버 등록 완료")
+        checkConnectedDeviceBattery()
     }
 
-    private fun stopLeScan() {
-        if (!isScanning) return
+    private fun checkConnectedDeviceBattery() {
+        if (!checkPermissions()) return
+
+        val connectedDevices = bluetoothHeadset?.connectedDevices
         
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-
-        addLog("⏹ 스캔 정지.")
-        isScanning = false
-        btnScan.text = "스캔 시작"
-        statusText.text = "스캔 완료"
-        bluetoothLeScanner?.stopScan(scanCallback)
-    }
-
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            super.onScanResult(callbackType, result)
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                ActivityCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                return
+        if (!connectedDevices.isNullOrEmpty()) {
+            for (device in connectedDevices) {
+                val deviceName = getDeviceName(device)
+                val batteryLevel = getBatteryLevelViaReflection(device)
+                
+                addLog("📱 연결 기기 발견: $deviceName | 배터리 수치: ${if (batteryLevel != -1) "$batteryLevel%" else "읽는 중..."}")
+                
+                if (batteryLevel != -1) {
+                    updateBatteryUI(deviceName, batteryLevel)
+                } else {
+                    runOnUiThread {
+                        batteryResultText.text = "🎧 연결 기기: $deviceName\n안드로이드 배터리 상태 수신 대기 중..."
+                    }
+                }
             }
-
-            val rssi = result.rssi
-            val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
-
-            // 근처 기기 (RSSI -70 dBm 이상) 신호만 대조
-            if (rssi > -70) {
-                val hexStr = manuData.joinToString(" ") { "%02X".format(it) }
-                addLog("⚡ [근접 Apple 신호!] RSSI: $rssi | Hex: $hexStr")
-
-                parseBatteryOrSignal(manuData, rssi)
+        } else {
+            addLog("⚠️ 연결된 블루투스 헤드셋 기기가 없습니다.")
+            runOnUiThread {
+                batteryResultText.text = "🎧 연결된 에어팟이 없습니다.\n스마트폰 설정에서 에어팟을 먼저 블루투스로 연결해 주세요."
             }
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            super.onScanFailed(errorCode)
-            addLog("스캔 실패: $errorCode")
-            statusText.text = "스캔 실패"
-            stopLeScan()
         }
     }
 
-    private fun parseBatteryOrSignal(data: ByteArray, rssi: Int) {
-        try {
-            var startIdx = -1
-            for (i in 0 until data.size - 2) {
-                if (data[i] == 0x07.toByte()) {
-                    startIdx = i
-                    break
-                }
-            }
-
-            if (startIdx != -1 && data.size >= startIdx + 6) {
-                // 0x07 배터리 패킷 포착 시
-                val statusByte = data[startIdx + 3].toInt() and 0xFF
-                val earbudByte = data[startIdx + 4].toInt() and 0xFF
-                val caseByte = data[startIdx + 5].toInt() and 0xFF
-
-                val rawLeft = (earbudByte and 0xF0) shr 4
-                val rawRight = earbudByte and 0x0F
-                val rawCase = (caseByte and 0xF0) shr 4
-
-                val isFlipped = (statusByte and 0x20) != 0
-                val leftVal = if (isFlipped) rawRight else rawLeft
-                val rightVal = if (isFlipped) rawLeft else rawRight
-
-                val leftStr = formatBattery(leftVal)
-                val rightStr = formatBattery(rightVal)
-                val caseStr = formatBattery(rawCase)
-
-                runOnUiThread {
-                    batteryResultText.text = "🎉 [에어팟 프로3 배터리 해독!]\n• L: $leftStr | R: $rightStr | Case: $caseStr\n(신호 강도: $rssi dBm)"
-                }
-            } else {
-                // 0x07 패킷은 아니지만 바로 옆에서 강력한 Apple 신호(0x12, 0x10 등)가 들어올 때
-                runOnUiThread {
-                    batteryResultText.text = "📡 바로 옆 에어팟 신호 수신 중...\n(뚜껑을 닫았다가 다시 열면 배터리가 표시됩니다!)"
-                }
-            }
+    private fun getBatteryLevelViaReflection(device: BluetoothDevice): Int {
+        return try {
+            val method = device.javaClass.getMethod("getBatteryLevel")
+            val level = method.invoke(device) as? Int ?: -1
+            level
         } catch (e: Exception) {
-            Log.e(TAG, "Parsing error", e)
+            -1
         }
     }
 
-    private fun formatBattery(valRaw: Int): String {
-        return when (valRaw) {
-            in 0..10 -> "${valRaw * 10}%"
-            15 -> "미연결/케이스 안"
-            else -> "$valRaw"
+    private fun getDeviceName(device: BluetoothDevice): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            "알 수 없는 기기"
+        } else {
+            device.name ?: device.address ?: "블루투스 기기"
+        }
+    }
+
+    private fun updateBatteryUI(deviceName: String, batteryLevel: Int) {
+        val displayText = """
+            🎉 [연결된 에어팟 배터리 수신 성공!]
+            
+            • 기기명: $deviceName
+            • 잔여 배터리: $batteryLevel%
+            
+            (안드로이드 공식 Bluetooth Profile 연동)
+        """.trimIndent()
+
+        runOnUiThread {
+            batteryResultText.text = displayText
         }
     }
 
@@ -268,11 +267,9 @@ class MainActivity : AppCompatActivity() {
     private fun checkPermissions(): Boolean {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
+
         return permissions.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -281,18 +278,34 @@ class MainActivity : AppCompatActivity() {
     private fun requestPermissions() {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
+
         ActivityCompat.requestPermissions(this, permissions.toTypedArray(), PERMISSION_REQUEST_CODE)
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {}
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                statusText.text = "권한 허용됨."
+                initBluetoothProfileAndReceiver()
+            } else {
+                statusText.text = "권한 거부됨."
+                Toast.makeText(this, "연결 기기 정보를 읽기 위해 블루투스 권한이 필요합니다.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
-    override fun onPause() {
-        super.onPause()
-        if (isScanning) stopLeScan()
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(bluetoothReceiver)
+            if (bluetoothAdapter != null && bluetoothHeadset != null) {
+                bluetoothAdapter?.closeProfileProxy(BluetoothProfile.HEADSET, bluetoothHeadset)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Unregister error", e)
+        }
     }
 }
