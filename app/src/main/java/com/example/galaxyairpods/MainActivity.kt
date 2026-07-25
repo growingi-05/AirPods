@@ -29,16 +29,19 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsRealtime"
+    private val TAG = "AirPodsMonitor"
     private val PERMISSION_REQUEST_CODE = 1001
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var isScanning = false
+    private var isConnected = false
     private var connectedDeviceName: String = "더혀니의 AirPods Pro"
-    private val handler = Handler(Looper.getMainLooper())
 
-    // 15초 이내 수신 패킷을 보관하는 링 버퍼
+    private val handler = Handler(Looper.getMainLooper())
+    private var batteryUpdateRunnable: Runnable? = null
+
+    // 15초 이내 수신된 패킷 보관용 메모리 링 버퍼
     private data class PacketRecord(val timestamp: Long, val data: ByteArray, val rssi: Int)
     private val packetQueue = ConcurrentLinkedQueue<PacketRecord>()
 
@@ -47,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnManualSearch: Button
 
+    // 오디오 페어링 및 연결 감지 리시버
     private val connectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -59,11 +63,17 @@ class MainActivity : AppCompatActivity() {
 
             when (action) {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    isConnected = true
                     connectedDeviceName = getDeviceName(device)
-                    addLog("⚡ [기기 오디오 연결 완료] $connectedDeviceName")
+                    addLog("⚡ [기기 연결 감지] $connectedDeviceName")
+
+                    // 연결 완료 직후 1초 간격 실시간 배터리 추적 루틴 작동
+                    start1SecondBatteryPolling()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
-                    addLog("🔌 [기기 연결 해제]")
+                    isConnected = false
+                    addLog("🔌 [기기 연결 해제] 주기적 업데이트 중단")
+                    stop1SecondBatteryPolling()
                 }
             }
         }
@@ -78,15 +88,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Realtime Monitor"
+            text = "AirPods Pro Realtime Monitor"
             textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 10)
         }
 
-        // 최상단 배터리 정보 카드
         topResultCard = TextView(this).apply {
-            text = "🎧 에어팟 뚜껑을 열어주세요...\n(실시간으로 배터리를 감지합니다)"
+            text = "🎧 에어팟 뚜껑을 열거나 연결해 주세요..."
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(35, 35, 35, 35)
@@ -94,7 +103,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         statusText = TextView(this).apply {
-            text = "초고속 무필터 실시간 스캔 대기 중"
+            text = "실시간 무필터 스캐너 대기 중"
             textSize = 13f
             setPadding(0, 15, 0, 10)
         }
@@ -113,7 +122,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 실시간 스캔 로그 ---\n"
+            text = "--- 스마트 모니터링 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -146,14 +155,13 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            addLog("📡 무필터 고속 실시간 스캐너 가동 시작")
+            addLog("📡 무필터 고속 실시간 스캐너 가동")
             startRealtimeScan()
         } else {
             requestPermissions()
         }
     }
 
-    // ★ ScanFilter를 완전히 제거하여 갤럭시 칩셋의 패킷 누락 원천 차단
     private fun startRealtimeScan() {
         if (isScanning) return
         bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner ?: return
@@ -164,84 +172,94 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "실시간 패킷 수신 중 (뚜껑을 열어보세요)"
+        statusText.text = "실시간 BLE 수신 중..."
 
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY) // 최고 성능 로우 레턴시
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        // 필터 없이 모든 BLE 광고 패킷 수신
+        // ScanFilter 없이 모든 BLE 수신 (갤럭시 누락 방지)
         bluetoothLeScanner?.startScan(null, settings, scanCallback)
     }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
-            
-            // 수신된 패킷에서 Apple 제조사 데이터(0x004C)만 소프트웨어로 추출
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
-            
+
             val currentTime = System.currentTimeMillis()
             packetQueue.add(PacketRecord(currentTime, manuData, result.rssi))
 
-            // 15초 지난 패킷 정리
+            // 15초 초과 패킷 자동 정리
             while (packetQueue.isNotEmpty() && (currentTime - (packetQueue.peek()?.timestamp ?: currentTime)) > 15000) {
                 packetQueue.poll()
             }
 
-            // ★ 핵심: 패킷이 들어오는 찰나에 유효한 배터리 데이터면 즉시 화면 갱신!
+            // 실시간 평문 패킷 검증 및 화면 반영
             val batteryInfo = parseValidAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
-                val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
-                
-                runOnUiThread {
-                    topResultCard.text = """
-                        🎉 [$connectedDeviceName 배터리 정보]
-                        
-                        • 왼쪽 (L): $leftStr
-                        • 오른쪽 (R): $rightStr
-                        • 충전 케이스: $caseStr
-                        
-                        (신호 감도: ${result.rssi} dBm)
-                    """.trimIndent()
-                }
+                val (leftStr, rightStr, caseStr, _) = batteryInfo
+                updateUI(leftStr, rightStr, caseStr, result.rssi)
             }
         }
     }
 
-    private fun searchBatteryFromQueue() {
-        if (packetQueue.isEmpty()) {
-            addLog("⚠️ 링 버퍼에 수집된 패킷이 없습니다.")
-            return
+    // 페어링 이후 1초 간격으로 BLE 링 버퍼를 역탐색하여 최신 배터리 갱신
+    private fun start1SecondBatteryPolling() {
+        stop1SecondBatteryPolling()
+
+        batteryUpdateRunnable = object : Runnable {
+            override fun run() {
+                if (!isConnected) return
+
+                val found = searchBatteryFromQueue()
+                if (found) {
+                    statusText.text = "연결됨: 1초 주기 최신 배터리 갱신 완료"
+                } else {
+                    statusText.text = "연결됨: 1초 주기 스캔 중 (수면/암호화 패킷 대기)"
+                }
+
+                handler.postDelayed(this, 1000)
+            }
         }
 
-        var foundValid = false
+        handler.post(batteryUpdateRunnable!!)
+    }
+
+    private fun stop1SecondBatteryPolling() {
+        batteryUpdateRunnable?.let { handler.removeCallbacks(it) }
+        batteryUpdateRunnable = null
+        if (!isConnected) {
+            statusText.text = "대기 중 (연결 해제됨)"
+        }
+    }
+
+    private fun searchBatteryFromQueue(): Boolean {
+        if (packetQueue.isEmpty()) return false
+
         for (record in packetQueue.reversed()) {
             val batteryInfo = parseValidAirPodsBatteryData(record.data)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
-                foundValid = true
-
-                runOnUiThread {
-                    topResultCard.text = """
-                        🎉 [$connectedDeviceName 배터리 정보 (수동검색)]
-                        
-                        • 왼쪽 (L): $leftStr
-                        • 오른쪽 (R): $rightStr
-                        • 충전 케이스: $caseStr
-                        
-                        (신호 감도: ${record.rssi} dBm)
-                    """.trimIndent()
-                }
-
-                addLog("✅ [수동 해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${record.rssi} dBm)")
-                addLog("  └ Raw Hex: $rawHex")
-                break
+                updateUI(leftStr, rightStr, caseStr, record.rssi)
+                addLog("✅ [큐 최신 해독] L:$leftStr | R:$rightStr | Case:$caseStr (${record.rssi} dBm)")
+                return true
             }
         }
+        return false
+    }
 
-        if (!foundValid) {
-            addLog("🔍 현재 큐에 유효한 평문 배터리 패킷이 없습니다.")
+    private fun updateUI(leftStr: String, rightStr: String, caseStr: String, rssi: Int) {
+        runOnUiThread {
+            topResultCard.text = """
+                🎉 [$connectedDeviceName 배터리 정보]
+                
+                • 왼쪽 (L): $leftStr
+                • 오른쪽 (R): $rightStr
+                • 충전 케이스: $caseStr
+                
+                (신호 감도: $rssi dBm / 1초 주기 추적)
+            """.trimIndent()
         }
     }
 
@@ -265,6 +283,7 @@ class MainActivity : AppCompatActivity() {
                         val leftVal = if (isFlipped) rawRight else rawLeft
                         val rightVal = if (isFlipped) rawLeft else rawRight
 
+                        // 무효/암호화 더미 범위(11~14) 차단
                         if (leftVal in 11..14 || rightVal in 11..14 || rawCase in 11..14) {
                             i += if (subLen > 0) subLen + 2 else 1
                             continue
@@ -282,7 +301,7 @@ class MainActivity : AppCompatActivity() {
                             val isCaseCharging = (chargeStatus and 0x04) != 0
 
                             val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
-                            val rightCharging = if (isFlipped) isLeftCharging else rawRight.let { isFlipped } // safe alignment
+                            val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
 
                             val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
                             val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
@@ -365,6 +384,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try {
+            stop1SecondBatteryPolling()
             unregisterReceiver(connectionReceiver)
             if (isScanning) {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
