@@ -23,12 +23,15 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
     private val TAG = "AirPodsScanner"
     private val PERMISSION_REQUEST_CODE = 1001
-    private val SCAN_PERIOD: Long = 12000 // 12초 스캔
+    private val SCAN_PERIOD: Long = 15000 // 15초 스캔
 
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bluetoothLeScanner: BluetoothLeScanner? = null
@@ -36,63 +39,68 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
 
     private lateinit var statusText: TextView
-    private lateinit var batteryResultText: TextView
     private lateinit var logText: TextView
     private lateinit var btnScan: Button
+    private lateinit var btnClear: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 100, 50, 50)
+            setPadding(40, 80, 40, 40)
         }
 
         val titleText = TextView(this).apply {
-            text = "Galaxy AirPods Controller"
-            textSize = 24f
+            text = "AirPods Pro 3 Raw Packet Dumper"
+            textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(0, 0, 0, 20)
+            setPadding(0, 0, 0, 15)
         }
 
         statusText = TextView(this).apply {
-            text = "에어팟 뚜껑을 연 뒤 스캔을 눌러주세요."
-            textSize = 15f
-            setPadding(0, 0, 0, 20)
+            text = "뚜껑을 닫았다가 스캔 시작 후 열어주세요."
+            textSize = 14f
+            setPadding(0, 0, 0, 15)
+        }
+
+        val btnLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
 
         btnScan = Button(this).apply {
-            text = "에어팟 탐색 시작"
-            setPadding(0, 30, 0, 30)
+            text = "Raw 스캔 시작"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f)
         }
 
-        batteryResultText = TextView(this).apply {
-            text = "🎧 에어팟 신호를 대기 중입니다..."
-            textSize = 15f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(30, 30, 30, 30)
-            setBackgroundColor(0xFFE8F0FE.toInt())
+        btnClear = Button(this).apply {
+            text = "로그 지우기"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { logText.text = "--- Raw Packet Log ---\n" }
         }
+
+        btnLayout.addView(btnScan)
+        btnLayout.addView(btnClear)
 
         val scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0, 1.0f
             )
-            setPadding(0, 30, 0, 0)
+            setPadding(0, 20, 0, 0)
         }
 
         logText = TextView(this).apply {
-            text = "--- 수신 로그 ---\n"
-            textSize = 12f
+            text = "--- Raw Packet Log ---\n"
+            textSize = 11f
             setBackgroundColor(0x11000000)
+            setTextIsSelectable(true) // 모바일에서 텍스트 복사 가능
         }
         scrollView.addView(logText)
 
         rootLayout.addView(titleText)
         rootLayout.addView(statusText)
-        rootLayout.addView(btnScan)
-        rootLayout.addView(batteryResultText)
+        rootLayout.addView(btnLayout)
         rootLayout.addView(scrollView)
         setContentView(rootLayout)
 
@@ -100,7 +108,7 @@ class MainActivity : AppCompatActivity() {
         bluetoothAdapter = bluetoothManager.adapter
 
         if (bluetoothAdapter == null) {
-            statusText.text = "오류: 이 기기는 블루투스를 지원하지 않습니다."
+            statusText.text = "오류: 블루투스 미지원 기기"
             btnScan.isEnabled = false
             return
         }
@@ -135,16 +143,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("🔍 스캔 시작 (에어팟 뚜껑을 열어 스마트폰 옆에 대어주세요)")
+        addLog("▶ 스캔 시작! 지금 에어팟 뚜껑을 열어주세요.")
         isScanning = true
         btnScan.text = "스캔 정지"
-        statusText.text = "에어팟 배터리 데이터 분석 중..."
+        statusText.text = "Apple Raw 패킷 수집 중..."
 
         handler.postDelayed({
             stopLeScan()
         }, SCAN_PERIOD)
 
-        // Apple (0x004C) 제조사 데이터 스캔
         val appleFilter = ScanFilter.Builder()
             .setManufacturerData(0x004C, byteArrayOf()) 
             .build()
@@ -169,10 +176,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        addLog("스캔 정지.")
+        addLog("⏹ 스캔 정지.")
         isScanning = false
-        btnScan.text = "에어팟 탐색 시작"
-        statusText.text = "스캔 완료"
+        btnScan.text = "Raw 스캔 시작"
+        statusText.text = "스캔 완료. 로그에서 뚜껑 연 직후 데이터를 확인하세요."
         bluetoothLeScanner?.stopScan(scanCallback)
     }
 
@@ -187,13 +194,12 @@ class MainActivity : AppCompatActivity() {
 
             val rssi = result.rssi
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
-            val dataHex = manuData.joinToString("") { "%02X ".format(it) }
 
-            // 로그에 수신되는 데이터 헤더 표시
-            addLog("📡 [신호 수신] RSSI: $rssi dBm | Length: ${manuData.size}B\nHex: $dataHex")
+            // 조건 0%: 필터링 없이 수신되는 모든 Apple 패킷의 Raw Hex를 시간과 함께 출력
+            val timeStr = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date())
+            val hexData = manuData.joinToString(" ") { "%02X".format(it) }
 
-            // ★ 핵심: 애플 기기 패킷 내부에서 에어팟 배터리 프로토콜(0x07) 위치 자동 탐색
-            parseAirPodsPacket(manuData, rssi)
+            addLog("[$timeStr] RSSI:$rssi | Len:${manuData.size}B\nHex: $hexData\n")
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -201,61 +207,6 @@ class MainActivity : AppCompatActivity() {
             addLog("스캔 실패: 오류 코드 $errorCode")
             statusText.text = "스캔 실패"
             stopLeScan()
-        }
-    }
-
-    private fun parseAirPodsPacket(data: ByteArray, rssi: Int) {
-        try {
-            // 바이트 배열에서 에어팟 배터리 데이터 시작점(0x07)을 찾음
-            var startIdx = -1
-            for (i in 0 until data.size - 5) {
-                if (data[i] == 0x07.toByte()) {
-                    startIdx = i
-                    break
-                }
-            }
-
-            if (startIdx != -1 && data.size >= startIdx + 7) {
-                // 0x07 이후의 배터리 데이터 영역 인덱싱
-                val rawLeft = (data[startIdx + 5].toInt() and 0xF0) shr 4
-                val rawRight = data[startIdx + 5].toInt() and 0x0F
-                val rawCase = (data[startIdx + 6].toInt() and 0xF0) shr 4
-
-                // 유닛 반전 비트 확인
-                val isFlipped = (data[startIdx + 4].toInt() and 0x20) != 0
-                val leftVal = if (isFlipped) rawRight else rawLeft
-                val rightVal = if (isFlipped) rawLeft else rawRight
-
-                val leftStr = formatBattery(leftVal)
-                val rightStr = formatBattery(rightVal)
-                val caseStr = formatBattery(rawCase)
-
-                val displayText = """
-                    🎉 [에어팟 배터리 감지 성공!]
-                    
-                    • 왼쪽 유닛 (L): $leftStr
-                    • 오른쪽 유닛 (R): $rightStr
-                    • 충전 케이스: $caseStr
-                    
-                    (신호 세기: $rssi dBm)
-                """.trimIndent()
-
-                runOnUiThread {
-                    batteryResultText.text = displayText
-                }
-
-                addLog("✅ [배터리 매칭 완료] L: $leftStr, R: $rightStr, Case: $caseStr")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "패킷 해독 예외", e)
-        }
-    }
-
-    private fun formatBattery(valRaw: Int): String {
-        return when (valRaw) {
-            in 0..10 -> "${valRaw * 10}%"
-            15 -> "케이스 내부 / 미연결"
-            else -> "알 수 없음 ($valRaw)"
         }
     }
 
@@ -299,10 +250,10 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                statusText.text = "권한 허용됨. 스캔 가능."
+                statusText.text = "권한 허용됨."
             } else {
-                statusText.text = "권한 거부됨. 스캔 불가."
-                Toast.makeText(this, "스캔을 위해 권한이 필요합니다.", Toast.LENGTH_LONG).show()
+                statusText.text = "권한 거부됨."
+                Toast.makeText(this, "권한이 필요합니다.", Toast.LENGTH_LONG).show()
             }
         }
     }
