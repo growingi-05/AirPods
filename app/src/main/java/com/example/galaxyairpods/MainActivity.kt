@@ -20,7 +20,6 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,9 +34,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnClearLog: Button
 
-    // 중복 로그 방지를 위한 큐 (화면이 너무 빨리 넘어가는 것 방지)
-    private val lastSeenHex = ConcurrentLinkedQueue<String>()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -50,14 +46,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Raw Sniffer (원본 추적기)"
+            text = "AirPods Raw Sniffer (무제한 폭포수 모드)"
             textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 10)
         }
 
         statusText = TextView(this).apply {
-            text = "스캔 준비 중... (애플 기기의 모든 원본 패킷 수신 중)"
+            text = "스캔 준비 중... (중복 방지 꺼짐, 모든 0x07 수신)"
             textSize = 14f
             setPadding(0, 15, 0, 10)
         }
@@ -91,11 +87,10 @@ class MainActivity : AppCompatActivity() {
 
         btnClearLog.setOnClickListener {
             logText.text = "--- 원본(Raw Hex) 수신 로그 ---\n"
-            lastSeenHex.clear()
         }
 
         if (hasAppPermissions()) {
-            addLog("📡 원본 데이터 스캐너 가동 중...")
+            addLog("📡 원본 데이터 무제한 스캐너 가동 중...")
             startRealtimeScan()
         } else {
             requestAppPermissions()
@@ -112,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "패킷 추적 중... (필터 완전 해제)"
+        statusText.text = "패킷 추적 중... (필터 및 중복 방지 완전 해제)"
 
         val filters = listOf(
             ScanFilter.Builder()
@@ -131,22 +126,14 @@ class MainActivity : AppCompatActivity() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
 
-            // 🚨 1. RSSI(신호 강도) 제한 완전히 삭제! 멀리 있는 것도 일단 다 잡아!
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 🚨 2. 0x07로 시작해야 한다는 조건도 완전히 삭제! 데이터가 있으면 무조건 찍기!
-            if (manuData.isNotEmpty()) {
+            // 🚨 0x07(에어팟 비콘)로 시작하는 데이터만 중복 제거 없이 전부 화면에 출력!
+            if (manuData.isNotEmpty() && manuData[0] == 0x07.toByte()) {
                 val hexString = manuData.joinToString(" ") { "%02X".format(it) }
-
-                // 화면 미친듯이 올라가는 것만 방지
-                if (!lastSeenHex.contains(hexString)) {
-                    lastSeenHex.add(hexString)
-                    // 너무 많이 쌓이면 오래된 것 삭제
-                    if (lastSeenHex.size > 30) {
-                        lastSeenHex.poll()
-                    }
-                    addLog("📡 [${result.rssi}dBm] $hexString")
-                }
+                
+                // 중복 방지 없이 무조건 찍어냅니다. (데이터 변화를 확실히 보기 위함)
+                addLog("📡 [${result.rssi}dBm] $hexString")
             }
         }
 
@@ -161,6 +148,7 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, message)
         runOnUiThread {
             logText.append("$message\n")
+            // 스크롤이 자동으로 아래로 내려가도록 처리
             (logText.parent as? ScrollView)?.post {
                 (logText.parent as ScrollView).fullScroll(ScrollView.FOCUS_DOWN)
             }
