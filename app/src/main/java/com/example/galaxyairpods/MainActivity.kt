@@ -29,7 +29,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
-    private val TAG = "AirPodsVerified"
+    private val TAG = "AirPodsFixMain"
     private val PERMISSION_REQUEST_CODE = 1001
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -37,7 +37,8 @@ class MainActivity : AppCompatActivity() {
     private var isScanning = false
     private var isConnected = false
 
-    private var connectedDeviceName: String = "AirPods Pro"
+    // 실시간 연결된 기기 이름
+    private var activeDeviceName: String = "내 AirPods Pro"
     private var totalApplePackets = 0
 
     private var lastValidLeft: String? = null
@@ -55,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnManualSearch: Button
 
+    // 오디오 연결 감지 (진짜 연결된 기기 이름 수집)
     private val connectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -68,9 +70,11 @@ class MainActivity : AppCompatActivity() {
             when (action) {
                 BluetoothDevice.ACTION_ACL_CONNECTED -> {
                     isConnected = true
-                    val name = getDeviceName(device)
-                    if (name.isNotBlank()) connectedDeviceName = name
-                    addLog("⚡ [기기 연결 감지] $connectedDeviceName")
+                    val fetchedName = getDeviceName(device)
+                    if (fetchedName.isNotBlank()) {
+                        activeDeviceName = fetchedName
+                    }
+                    addLog("⚡ [실시간 기기 연결 완료] $activeDeviceName")
                     start1SecondBatteryPolling()
                 }
                 BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
@@ -101,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         topResultCard = TextView(this).apply {
-            text = "🎧 [$connectedDeviceName]\n에어팟 케이스 뚜껑을 닫았다가 다시 열어보세요..."
+            text = "🎧 [$activeDeviceName]\n배터리 신호를 탐색 중입니다..."
             textSize = 15f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(35, 35, 35, 35)
@@ -128,7 +132,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         logText = TextView(this).apply {
-            text = "--- 0x19 평문 패킷 검증 로그 ---\n"
+            text = "--- 수신 및 해독 로그 ---\n"
             textSize = 11f
             setBackgroundColor(0x11000000)
             setTextIsSelectable(true)
@@ -158,15 +162,16 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(connectionReceiver, filter)
 
         if (checkPermissions()) {
-            loadPairedAirPodsName()
-            addLog("📡 BLE 정밀 스캐너 가동 중...")
+            initDeviceNameFromBonded()
+            addLog("📡 BLE 스캐너 가동 중...")
             startRealtimeScan()
         } else {
             requestPermissions()
         }
     }
 
-    private fun loadPairedAirPodsName() {
+    // 초기 실행 시 등록된 기기 이름 임시 가져오기 (연결 시 실제 이름으로 자동 교체됨)
+    private fun initDeviceNameFromBonded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             return
@@ -180,18 +185,14 @@ class MainActivity : AppCompatActivity() {
                     device.name ?: ""
                 }
                 if (name.contains("AirPods", ignoreCase = true) || name.contains("에어팟", ignoreCase = true)) {
-                    connectedDeviceName = name
-                    addLog("📱 페어링된 기기 확인: $connectedDeviceName")
-                    runOnUiThread {
-                        if (lastValidLeft == null) {
-                            topResultCard.text = "🎧 [$connectedDeviceName]\n에어팟 케이스 뚜껑을 닫았다가 열어보세요..."
-                        }
+                    if (activeDeviceName == "내 AirPods Pro") {
+                        activeDeviceName = name
                     }
                     return
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "loadPairedAirPodsName error", e)
+            Log.e(TAG, "initDeviceNameFromBonded error", e)
         }
     }
 
@@ -205,7 +206,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "BLE 광고 패킷 감지 중..."
+        statusText.text = "BLE 패킷 수신 중..."
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
@@ -228,7 +229,8 @@ class MainActivity : AppCompatActivity() {
                 packetQueue.poll()
             }
 
-            val batteryInfo = parseStrictPlaintextBattery(manuData)
+            // 실시간 수신 패킷 해독
+            val batteryInfo = parseAirPodsBatteryData(manuData)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, rawHex) = batteryInfo
 
@@ -237,8 +239,8 @@ class MainActivity : AppCompatActivity() {
                 lastValidCase = caseStr
 
                 updateUI(leftStr, rightStr, caseStr, result.rssi)
-                addLog("🎉 [0x19 평문 배터리 확정!] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
-                addLog("  └ Raw Hex: $rawHex")
+                addLog("🎉 [배터리 해독 성공] L:$leftStr | R:$rightStr | Case:$caseStr (${result.rssi} dBm)")
+                addLog("  └ Raw: $rawHex")
             }
         }
 
@@ -271,7 +273,7 @@ class MainActivity : AppCompatActivity() {
         if (packetQueue.isEmpty()) return false
 
         for (record in packetQueue.reversed()) {
-            val batteryInfo = parseStrictPlaintextBattery(record.data)
+            val batteryInfo = parseAirPodsBatteryData(record.data)
             if (batteryInfo != null) {
                 val (leftStr, rightStr, caseStr, _) = batteryInfo
                 lastValidLeft = leftStr
@@ -292,7 +294,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(leftStr: String, rightStr: String, caseStr: String, rssi: Int) {
         runOnUiThread {
             topResultCard.text = """
-                🎉 [$connectedDeviceName 배터리 정보]
+                🎉 [$activeDeviceName 배터리 정보]
                 
                 • 왼쪽 (L): $leftStr
                 • 오른쪽 (R): $rightStr
@@ -300,67 +302,54 @@ class MainActivity : AppCompatActivity() {
                 
                 (신호 감도: $rssi dBm)
             """.trimIndent()
-            statusText.text = "평문 배터리 포착 완료"
+            statusText.text = "실시간 수신 완료"
         }
     }
 
-    // ★ 0x11(17바이트 암호화)은 철저히 무시하고, 0x19(25바이트 평문)만 엄격 해독하는 규격 함수
-    private fun parseStrictPlaintextBattery(data: ByteArray): Quadruple<String, String, String, String>? {
+    // 패킷 길이 제한을 완전 제거하고 모든 0x07 패킷을 해독
+    private fun parseAirPodsBatteryData(data: ByteArray): Quadruple<String, String, String, String>? {
         try {
             var i = 0
-            while (i < data.size - 5) {
+            while (i <= data.size - 6) {
                 if (data[i] == 0x07.toByte()) {
                     val subLen = data[i + 1].toInt() and 0xFF
 
-                    // ★ 핵심 검증: 서브 패킷 길이가 0x11(17바이트)이거나 20바이트 미만이면 암호화 비콘이므로 Skip!
-                    if (subLen < 20 || subLen == 0x11) {
-                        i += if (subLen > 0) subLen + 2 else 1
-                        continue
+                    val statusByte = data[i + 3].toInt() and 0xFF
+                    val earbudByte = data[i + 4].toInt() and 0xFF
+                    val caseByte = data[i + 5].toInt() and 0xFF
+
+                    val rawLeft = (earbudByte and 0xF0) ushr 4
+                    val rawRight = earbudByte and 0x0F
+                    val rawCase = (caseByte and 0xF0) ushr 4
+
+                    val isFlipped = (statusByte and 0x20) != 0
+                    val leftVal = if (isFlipped) rawRight else rawLeft
+                    val rightVal = if (isFlipped) rawLeft else rawRight
+
+                    val isLeftValid = leftVal in 0..11 || leftVal == 15
+                    val isRightValid = rightVal in 0..11 || rightVal == 15
+                    val isCaseValid = rawCase in 0..11 || rawCase == 15
+                    val hasRealVal = leftVal in 0..11 || rightVal in 0..11 || rawCase in 0..11
+
+                    if (isLeftValid && isRightValid && isCaseValid && hasRealVal) {
+                        val chargeStatus = caseByte and 0x0F
+                        val isLeftCharging = (chargeStatus and 0x01) != 0
+                        val isRightCharging = (chargeStatus and 0x02) != 0
+                        val isCaseCharging = (chargeStatus and 0x04) != 0
+
+                        val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
+                        val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
+
+                        val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
+                        val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
+                        val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
+
+                        val endIdx = minOf(i + 2 + (if (subLen > 0) subLen else 15), data.size)
+                        val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
+
+                        return Quadruple(leftStr, rightStr, caseStr, rawHex)
                     }
 
-                    if (i + 5 < data.size) {
-                        val statusByte = data[i + 3].toInt() and 0xFF
-                        val earbudByte = data[i + 4].toInt() and 0xFF
-                        val caseByte = data[i + 5].toInt() and 0xFF
-
-                        val rawLeft = (earbudByte and 0xF0) ushr 4
-                        val rawRight = earbudByte and 0x0F
-                        val rawCase = (caseByte and 0xF0) ushr 4
-
-                        val isFlipped = (statusByte and 0x20) != 0
-                        val leftVal = if (isFlipped) rawRight else rawLeft
-                        val rightVal = if (isFlipped) rawLeft else rawRight
-
-                        // 난수 범위(12~14) 차단
-                        if (leftVal in 12..14 || rightVal in 12..14 || rawCase in 12..14) {
-                            i += if (subLen > 0) subLen + 2 else 1
-                            continue
-                        }
-
-                        val isLeftValid = leftVal in 0..11 || leftVal == 15
-                        val isRightValid = rightVal in 0..11 || rightVal == 15
-                        val isCaseValid = rawCase in 0..11 || rawCase == 15
-                        val hasRealVal = leftVal in 0..11 || rightVal in 0..11 || rawCase in 0..11
-
-                        if (isLeftValid && isRightValid && isCaseValid && hasRealVal) {
-                            val chargeStatus = caseByte and 0x0F
-                            val isLeftCharging = (chargeStatus and 0x01) != 0
-                            val isRightCharging = (chargeStatus and 0x02) != 0
-                            val isCaseCharging = (chargeStatus and 0x04) != 0
-
-                            val leftCharging = if (isFlipped) isRightCharging else isLeftCharging
-                            val rightCharging = if (isFlipped) isLeftCharging else isRightCharging
-
-                            val leftStr = formatBatteryWithCharge(leftVal, leftCharging)
-                            val rightStr = formatBatteryWithCharge(rightVal, rightCharging)
-                            val caseStr = formatBatteryWithCharge(rawCase, isCaseCharging)
-
-                            val endIdx = minOf(i + 2 + subLen, data.size)
-                            val rawHex = data.copyOfRange(i, endIdx).joinToString(" ") { "%02X".format(it) }
-
-                            return Quadruple(leftStr, rightStr, caseStr, rawHex)
-                        }
-                    }
                     i += if (subLen > 0) subLen + 2 else 1
                 } else {
                     val subLen = data[i + 1].toInt() and 0xFF
@@ -384,15 +373,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getDeviceName(device: BluetoothDevice?): String {
-        if (device == null) return connectedDeviceName
+        if (device == null) return activeDeviceName
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            return connectedDeviceName
+            return activeDeviceName
         }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            device.alias ?: device.name ?: connectedDeviceName
+            device.alias ?: device.name ?: activeDeviceName
         } else {
-            device.name ?: connectedDeviceName
+            device.name ?: activeDeviceName
         }
     }
 
@@ -441,7 +430,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
                 addLog("✅ 권한 승인 완료!")
-                loadPairedAirPodsName()
+                initDeviceNameFromBonded()
                 startRealtimeScan()
             } else {
                 addLog("❌ 필수 권한이 거부되었습니다.")
