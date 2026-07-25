@@ -20,6 +20,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.util.concurrent.ConcurrentLinkedQueue
 
 class MainActivity : AppCompatActivity() {
 
@@ -34,6 +35,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logText: TextView
     private lateinit var btnClearLog: Button
 
+    // 중복 로그 방지를 위한 큐 (화면 도배 방지)
+    private val lastSeenHex = ConcurrentLinkedQueue<String>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -46,14 +50,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         val titleText = TextView(this).apply {
-            text = "AirPods Raw Sniffer (무제한 폭포수 모드)"
+            text = "AirPods Raw Sniffer (완전 해제 모드)"
             textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setPadding(0, 0, 0, 10)
         }
 
         statusText = TextView(this).apply {
-            text = "스캔 준비 중... (중복 방지 꺼짐, 모든 0x07 수신)"
+            text = "스캔 준비 중... (모든 애플 데이터 수신 중)"
             textSize = 14f
             setPadding(0, 15, 0, 10)
         }
@@ -87,6 +91,8 @@ class MainActivity : AppCompatActivity() {
 
         btnClearLog.setOnClickListener {
             logText.text = "--- 원본(Raw Hex) 수신 로그 ---\n"
+            // 화면 지울 때 큐도 비워줘서 다시 찍힐 수 있게 함
+            lastSeenHex.clear()
         }
 
         if (hasAppPermissions()) {
@@ -107,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         isScanning = true
-        statusText.text = "패킷 추적 중... (필터 및 중복 방지 완전 해제)"
+        statusText.text = "패킷 추적 중... (필터 조건 0개)"
 
         val filters = listOf(
             ScanFilter.Builder()
@@ -128,12 +134,19 @@ class MainActivity : AppCompatActivity() {
 
             val manuData = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return
 
-            // 🚨 0x07(에어팟 비콘)로 시작하는 데이터만 중복 제거 없이 전부 화면에 출력!
-            if (manuData.isNotEmpty() && manuData[0] == 0x07.toByte()) {
+            // 🚨 0x07 시작 조건 아예 삭제! 
+            // 애플 전파면 무조건 16진수로 변환해서 화면에 다 때려 박습니다!
+            if (manuData.isNotEmpty()) {
                 val hexString = manuData.joinToString(" ") { "%02X".format(it) }
                 
-                // 중복 방지 없이 무조건 찍어냅니다. (데이터 변화를 확실히 보기 위함)
-                addLog("📡 [${result.rssi}dBm] $hexString")
+                // 똑같은 패킷이 화면을 꽉 채우는 것만 방지
+                if (!lastSeenHex.contains(hexString)) {
+                    lastSeenHex.add(hexString)
+                    if (lastSeenHex.size > 50) {
+                        lastSeenHex.poll()
+                    }
+                    addLog("📡 [${result.rssi}dBm] $hexString")
+                }
             }
         }
 
@@ -148,7 +161,6 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, message)
         runOnUiThread {
             logText.append("$message\n")
-            // 스크롤이 자동으로 아래로 내려가도록 처리
             (logText.parent as? ScrollView)?.post {
                 (logText.parent as ScrollView).fullScroll(ScrollView.FOCUS_DOWN)
             }
