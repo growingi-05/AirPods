@@ -21,6 +21,8 @@ jobs:
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.5' # Gradle 버전을 8.5로 고정하여 충돌 해결
 
     - name: Build Debug APK
       run: gradle :app:assembleDebug
